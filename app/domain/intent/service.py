@@ -43,8 +43,9 @@ class IntentRecognizer:
         return result
 
     # fallback 只做最薄规则兜底：按优先级识别
-    #   revise_plan（已有行程 + 改稿话术）→ qa（问候/闲聊）→ clarification/new_plan（字段判定）→ unknown
-    # confirm / end_session 依赖 LLM 判断（后续可补）
+    #   end_session（告别）→ revise_plan（已有行程 + 改稿话术）→ confirm（确认话术）
+    #   → qa（问候/闲聊）→ clarification/new_plan（字段判定）→ unknown
+    # reject 依赖 LLM 判断（后续可补）
     # 优先级设计意图（从高到低）：
     #   1. end_session  告别语无条件优先——用户要走，别的都不重要
     #   2. revise_plan  改稿是"动作性"最强的意图，且必须有已有行程才成立
@@ -223,8 +224,8 @@ def extract_dates(message: str) -> tuple[str | None, str | None]:
         )
 
     # 中文日期对：8月15到8月17号 / 8月15号到8月17号 / 8月10号到12号 / 9月30号到10月2号 / 8月10号-8月12号
-    # 注意第一段"号/日"可省略（用户常写"8月15到8月17号"），第二段月份可缺省（沿用第一个）
-    m = re.search(r"(\d{1,2})月(\d{1,2})(?:号|日)?\s*(?:到|[-–])\s*(?:(\d{1,2})月)?(\d{1,2})(?:号|日)", text)
+    # 注意"号/日"两端均可省略（用户常写"8月15到8月17"），第二段月份可缺省（沿用第一个）
+    m = re.search(r"(\d{1,2})月(\d{1,2})(?:号|日)?\s*(?:到|[-–])\s*(?:(\d{1,2})月)?(\d{1,2})(?:号|日)?", text)
     if m:
         month1, day1, month2, day2 = m.group(1), m.group(2), m.group(3), m.group(4)
         end_month = month2 if month2 else month1
@@ -275,8 +276,8 @@ def _cn_number(text: str) -> int | None:
 # 目的地提取时要去掉的常见引导词/动词/助词/问候词
 _DESTINATION_STOPWORDS = (
     "我想", "我要", "打算", "准备", "计划", "规划", "安排", "想去", "带我们", "帮我",
-    "去", "玩", "旅游", "旅行", "游玩", "逛逛", "看看", "看一下", "一下", "的", "个",
-    "吧", "啊", "呢", "我们", "帮忙", "给", "推荐", "行程", "路线", "攻略", "到",
+    "要", "去", "玩", "旅游", "旅行", "游玩", "逛逛", "看看", "看一下", "一下", "的", "个",
+    "吧", "啊", "呢", "我们", "帮忙", "给", "推荐", "行程", "路线", "攻略", "景点", "到",
     "哪里", "哪儿", "哪", "什么", "啥", "地方",
     "你好", "您好", "嗨", "哈喽", "在吗", "谢谢", "感谢", "辛苦了", "太棒了", "不错", "hello", "hi",
     "太感谢了", "谢谢啦", "感谢你", "多谢", "谢谢你们",
@@ -397,6 +398,8 @@ _CONFIRM_KEYWORDS = ("没问题", "就这样", "可以", "好的", "行", "确�
 
 def _is_confirm_message(message: str) -> bool:
     lowered = message.lower()
+    if "不行" in lowered or "行不行" in lowered:
+        return False
     return any(kw in lowered for kw in _CONFIRM_KEYWORDS)
 
 

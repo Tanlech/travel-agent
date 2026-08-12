@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+.venv/
+envs/
+
+# 环境与密钥（真实值用环境变量注入，勿提交）
+.env
+.env.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# 测试与缓存
+.pytest_cache/
+.cache/
+
+# 数据
+*.db

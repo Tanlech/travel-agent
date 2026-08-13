@@ -19,6 +19,9 @@ class StructuredLogger:
     def info(self, event: str, **fields) -> None:
         self._log(logging.INFO, event, fields)
 
+    def warning(self, event: str, **fields) -> None:
+        self._log(logging.WARNING, event, fields)
+
     def error(self, event: str, **fields) -> None:
         self._log(logging.ERROR, event, fields)
 

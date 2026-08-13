@@ -35,9 +35,12 @@ class SessionStateService:
         #    （new_plan + 字段齐 会在 _decide_stage 内返回 ready_to_plan）
         next_session.conversation_stage = self._decide_stage(next_session, intent_result, merge_result.remaining_missing_fields)
 
-        # 5. 改稿计数：revise_plan 时递增（后续可用于限制最大改稿次数等策略）
+        # 5. 改稿计数：revise_plan 时递增（后续可用于限制最大改稿次数等策略）；
+        #    全新规划（new_plan）时重置为 0，避免历史改稿次数污染新一轮规划的语义
         if intent_result.intent_type == "revise_plan":
             next_session.revision_count += 1
+        elif intent_result.intent_type == "new_plan":
+            next_session.revision_count = 0
 
         next_session.updated_at = self._now_iso()
 
@@ -77,7 +80,10 @@ class SessionStateService:
         # 改稿：还缺信息则继续收集，否则就绪等待执行
         if intent_result.intent_type == "revise_plan":
             return "revise_collecting" if missing_fields else "revise_ready"
-        # 缺关键字段 → 进入对应的 collecting 阶段（按优先级：目的地 > 日期 > 其他）
+        # 缺关键字段 → 进入对应的 collecting 阶段（按优先级：目的地 > 日期 > 其他）。
+        # 注意：当前 REQUIRED_FIELDS 仅含 destination/start_date/end_date 三个字段，
+        # 因此 collecting_requirements 分支暂不可达；若未来把 travelers/preferences 等
+        # 加入必填字段，此分支将自动生效，无需改动状态机结构。
         if missing_fields:
             if "destination" in missing_fields:
                 return "collecting_destination"

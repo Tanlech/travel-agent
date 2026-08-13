@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from app.domain.context.session import SessionContext
 from app.domain.context.user import UserContext
 from app.agents.schema.planning import PlanningRequest
-from app.domain.memory.schema import SessionMemory, TripMemory, UserMemory
+from app.domain.memory.schema import TripMemory, UserMemory
 from app.domain.memory.store import memory_store
 
 
@@ -43,30 +42,6 @@ class MemoryManager:
             senior_friendly=senior_friendly,
         )
 
-    def build_session_context(self, request: PlanningRequest, *, session_id: str | None = None) -> SessionContext:
-        stored = memory_store.load_session_memory(session_id)
-        confirmed_fields = list(stored.confirmed_fields) if stored else []
-        if request.destination and "destination" not in confirmed_fields:
-            confirmed_fields.append("destination")
-        if request.days and "days" not in confirmed_fields:
-            confirmed_fields.append("days")
-        if request.budget is not None and "budget" not in confirmed_fields:
-            confirmed_fields.append("budget")
-        return SessionContext(
-            session_id=session_id,
-            confirmed_fields=confirmed_fields,
-            pending_questions=list(stored.pending_questions) if stored else [],
-            conversation_stage=stored.conversation_stage if stored else "collecting_destination",
-            last_destination=stored.last_destination if stored else request.destination,
-            revision_count=stored.revision_count if stored else 0,
-        )
-
-    def load_session_artifacts(self, session_id: str | None) -> tuple[dict | None, dict | None]:
-        stored = memory_store.load_session_memory(session_id)
-        if not stored:
-            return None, None
-        return stored.current_plan, stored.current_draft
-
     def persist_user_memory(self, user_id: str | None, context: UserContext) -> None:
         if not user_id:
             return
@@ -80,23 +55,6 @@ class MemoryManager:
                 pace_preference=context.pace_preference,
                 family_friendly=context.family_friendly,
                 senior_friendly=context.senior_friendly,
-            )
-        )
-
-    def persist_session_memory(self, context: SessionContext, *, current_plan: dict | None = None, current_draft: dict | None = None) -> None:
-        if not context.session_id:
-            return
-        previous = memory_store.load_session_memory(context.session_id)
-        memory_store.save_session_memory(
-            SessionMemory(
-                session_id=context.session_id,
-                confirmed_fields=context.confirmed_fields,
-                pending_questions=context.pending_questions,
-                conversation_stage=context.conversation_stage,
-                last_destination=context.last_destination,
-                revision_count=context.revision_count,
-                current_plan=current_plan if current_plan is not None else (previous.current_plan if previous else None),
-                current_draft=current_draft if current_draft is not None else (previous.current_draft if previous else None),
             )
         )
 

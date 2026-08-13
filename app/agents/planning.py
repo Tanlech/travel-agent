@@ -44,10 +44,9 @@ class PlanningAgent:
 
         request = self._normalize_request(plan_input.request)
         state = context_builder.build_planning_context(request, user_id=plan_input.user_id, session_id=plan_input.session_id)
-        dialogue_decision, response_context, updated_session = planning_orchestrator.resolve(request, state.session)
-        state.session = updated_session
+        # 只读字段校验兜底（对话阶段判定已在 orchestrator 侧由 SessionStateService 完成）
+        dialogue_decision, response_context = planning_orchestrator.resolve(request, state.session)
         if dialogue_decision.status != "ready_to_plan":
-            memory_manager.persist_session_memory(state.session)
             raise ValueError(dialogue_decision.follow_up_question or "缺少必要规划字段")
 
         state.trace.append({"step": "dialogue_ready", "status": dialogue_decision.status, "response_mode": response_context.response_mode})
@@ -130,11 +129,6 @@ class PlanningAgent:
             state.plan.summary = ""
 
         memory_manager.persist_user_memory(plan_input.user_id, state.user)
-        memory_manager.persist_session_memory(
-            state.session,
-            current_plan=state.plan.model_dump() if state.plan else None,
-            current_draft=draft.model_dump() if draft else None,
-        )
         memory_manager.persist_trip_memory(
             plan_input.user_id,
             request,

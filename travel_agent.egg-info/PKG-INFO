@@ -9,6 +9,8 @@ Requires-Dist: pydantic-settings>=2.4.0
 Requires-Dist: openai>=1.40.0
 Requires-Dist: httpx>=0.27.0
 Requires-Dist: redis>=5.0.0
+Requires-Dist: fastapi>=0.110.0
+Requires-Dist: uvicorn[standard]>=0.27.0
 Provides-Extra: dev
 Requires-Dist: pytest>=8.0.0; extra == "dev"
 

@@ -4,8 +4,6 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from app.domain.stage import ConversationStage
-
 
 class UserMemory(BaseModel):
     user_id: str | None = None
@@ -16,17 +14,6 @@ class UserMemory(BaseModel):
     pace_preference: str | None = None
     family_friendly: bool | None = None
     senior_friendly: bool | None = None
-
-
-class SessionMemory(BaseModel):
-    session_id: str | None = None
-    confirmed_fields: list[str] = Field(default_factory=list)
-    pending_questions: list[str] = Field(default_factory=list)
-    conversation_stage: ConversationStage = "collecting_destination"
-    last_destination: str | None = None
-    revision_count: int = 0
-    current_plan: dict[str, Any] | None = None
-    current_draft: dict[str, Any] | None = None
 
 
 class TripMemory(BaseModel):

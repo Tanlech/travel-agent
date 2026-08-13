@@ -68,6 +68,10 @@ class SessionState(BaseModel):
     session_id: str
     user_id: str | None = None
 
+    # 乐观并发版本号：每次 save 递增；repository.save 在版本不一致时拒绝写入，
+    # 由调用方重新加载并重试，避免同一 session 并发请求互相覆盖状态
+    version: int = 0
+
     # 当前会话处于哪个阶段
     conversation_stage: ConversationStage = "collecting_destination"
 
@@ -95,7 +99,6 @@ class SessionIntentResult(BaseModel):
     extracted_request_patch: dict[str, Any] = Field(default_factory=dict)
     revision_scope_hint: RevisionScope | None = None
     missing_fields: list[str] = Field(default_factory=list)
-    should_load_existing_artifacts: bool = False
     reasoning: str | None = None
 
 

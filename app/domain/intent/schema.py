@@ -96,7 +96,6 @@ class IntentRecognitionOutput(BaseModel):
     extracted_request_patch: dict[str, Any] = Field(default_factory=dict)  # 本轮新增/修改的字段
     revision_scope_hint: RevisionScope | None = None  # 改动范围（仅 revise 有意义）
     missing_fields: list[str] = Field(default_factory=list)  # 仍缺的关键字段
-    should_load_existing_artifacts: bool = False  # 是否需要先读取已有行程
     reasoning: str | None = None  # 调试/回溯用，不直接展示给用户
     patch_dropped_fields: list[str] = Field(default_factory=list)  # 校验被丢弃的字段，诊断留痕
 
@@ -129,9 +128,8 @@ class IntentRecognitionOutput(BaseModel):
         if self.missing_fields:
             self.missing_fields = [f for f in self.missing_fields if f not in self.extracted_request_patch]
 
-        # 2. revise：改稿必须已有行程，先置加载标记；scope 缺省给 day_level（最局部、最安全）
+        # 2. revise：scope 缺省给 day_level（最局部、最安全）
         if self.intent_type == IntentType.REVISE_PLAN:
-            self.should_load_existing_artifacts = True
             if self.revision_scope_hint is None:
                 self.revision_scope_hint = "day_level"
 
@@ -142,12 +140,10 @@ class IntentRecognitionOutput(BaseModel):
                 f"{self.reasoning or ''}（归一：clarification 无缺失字段，降级为 new_plan）"
             ).strip()
 
-        # 4. 一致性：scope 与"加载已有行程"标记只属于 revise；
-        #    非 revise 意图（new_plan/clarification/qa/confirm/reject/end_session/unknown）
-        #    一律清空，避免 LLM 误带标记污染 session 层的 has_current_plan 判定
+        # 4. 一致性：scope 只属于 revise；非 revise 意图（new_plan/clarification/qa/confirm/reject/
+        #    end_session/unknown）一律清空，避免 LLM 误带标记污染下游判定
         if self.intent_type != IntentType.REVISE_PLAN:
             self.revision_scope_hint = None
-            self.should_load_existing_artifacts = False
         if self.intent_type in (
             IntentType.QA,
             IntentType.CONFIRM,

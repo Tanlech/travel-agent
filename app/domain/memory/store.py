@@ -1,12 +1,17 @@
 from __future__ import annotations
 
-from app.domain.memory.schema import SessionMemory, TripMemory, UserMemory
+from app.domain.memory.schema import TripMemory, UserMemory
 
 
 class MemoryStore:
+    """用户与行程记忆的内存实现。
+
+    注意：会话状态（SessionState）已由 Redis 持久化（app.domain.session.repository），
+    这里不再维护会话记忆，避免与新会话层双写分叉。
+    """
+
     def __init__(self) -> None:
         self._user_memory: dict[str, UserMemory] = {}
-        self._session_memory: dict[str, SessionMemory] = {}
         self._trip_memory: dict[str, list[TripMemory]] = {}
 
     def load_user_memory(self, user_id: str | None) -> UserMemory | None:
@@ -17,15 +22,6 @@ class MemoryStore:
     def save_user_memory(self, memory: UserMemory) -> None:
         if memory.user_id:
             self._user_memory[memory.user_id] = memory
-
-    def load_session_memory(self, session_id: str | None) -> SessionMemory | None:
-        if not session_id:
-            return None
-        return self._session_memory.get(session_id)
-
-    def save_session_memory(self, memory: SessionMemory) -> None:
-        if memory.session_id:
-            self._session_memory[memory.session_id] = memory
 
     def append_trip_memory(self, user_id: str | None, memory: TripMemory) -> None:
         if not user_id:

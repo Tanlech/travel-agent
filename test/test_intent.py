@@ -106,13 +106,11 @@ def test_clarification_downgrades_to_new_plan():
     assert IntentRecognitionOutput(intent_type="clarification").intent_type == IntentType.NEW_PLAN
 
 
-def test_non_revise_clears_load_flag():
+def test_non_revise_clears_scope():
     out = IntentRecognitionOutput(
         intent_type="new_plan",
-        should_load_existing_artifacts=True,
         revision_scope_hint="day_level",
     )
-    assert out.should_load_existing_artifacts is False
     assert out.revision_scope_hint is None
 
 

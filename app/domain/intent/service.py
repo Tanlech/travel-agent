@@ -87,7 +87,6 @@ class IntentRecognizer:
                 intent_type="revise_plan",
                 extracted_request_patch=request_patch,
                 revision_scope_hint=_infer_revision_scope(raw_message),
-                should_load_existing_artifacts=True,
                 reasoning="LLM intent 识别不可用，根据已有行程 + 改稿话术判定为 revise_plan。",
             )
 

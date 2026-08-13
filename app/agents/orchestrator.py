@@ -21,11 +21,12 @@ from app.domain.session.mapper import (
     user_context_to_revise_user_context,
 )
 from app.domain.session.pipeline import intent_session_pipeline
-from app.domain.session.repository_impl import redis_session_repository
+from app.domain.session.repository import redis_session_repository
 from app.domain.session.service import session_state_service
 from app.infrastructure.llm.client import get_llm_client
 from app.infrastructure.llm.schemas import ItineraryDraftSchema
 from app.domain.memory.manager import memory_manager
+from app.observability.monitoring import app_logger, metrics_recorder
 from app.observability.tracing import new_trace_id
 
 
@@ -71,22 +72,22 @@ class PlanningOrchestrator:
         is_same_destination = bool(destination and current_session.last_destination and destination == current_session.last_destination)
         stored_plan, stored_draft = redis_session_repository.load_artifacts(current_session.session_id)
         has_revision_artifacts = bool(stored_plan and stored_draft)
-        has_prior_plan = has_revision_artifacts or current_session.revision_count > 0 or current_session.conversation_stage == "revise_plan"
+        has_prior_plan = has_revision_artifacts or current_session.revision_count > 0 or current_session.conversation_stage in {"revise_collecting", "revise_ready"}
         has_explicit_revision_message = bool(str(request.revision_message or "").strip())
 
         if not missing:
             current_session.pending_questions = []
             current_session.confirmed_fields = ["destination", "days"]
             if current_session.last_destination and is_same_destination and has_prior_plan and has_explicit_revision_message:
-                current_session.conversation_stage = "revise_plan"
+                current_session.conversation_stage = "revise_ready"
                 current_session.revision_count += 1
                 return DialogueDecision(status="ready_to_revise"), ResponseContext(response_mode="revise_plan", needs_follow_up=False), current_session
-            current_session.conversation_stage = "new_plan"
+            current_session.conversation_stage = "ready_to_plan"
             current_session.last_destination = destination
             return DialogueDecision(status="ready_to_plan"), ResponseContext(response_mode="final_plan", needs_follow_up=False), current_session
 
         current_session.pending_questions = [field_labels[item] for item in missing]
-        current_session.conversation_stage = "clarification"
+        current_session.conversation_stage = "collecting_requirements"
         question = "请补充以下信息后我再开始规划：" + "、".join(current_session.pending_questions)
         return (
             DialogueDecision(status="need_clarification", missing_fields=missing, follow_up_question=question),
@@ -178,12 +179,12 @@ class TravelOrchestrator:
             draft = plan_result.get("final_draft")
             summary = (plan_result.get("final_decision") or {}).get("summary") or "已为你生成旅行行程。"
             # 写回会话产物（完整 plan/draft 存 Redis artifacts，摘要存 SessionState）
-            session_state.artifacts.has_current_plan = bool(plan)
-            session_state.artifacts.has_current_draft = bool(draft)
             if plan:
                 # 生成新摘要供下一轮意图识别使用（覆盖旧值）
                 session_state.artifacts.plan_summary = build_plan_summary(plan.model_dump())
                 redis_session_repository.save_artifacts(session_id, plan.model_dump(), draft.model_dump() if draft else None)
+            # 规划完成，推进阶段，避免后续闲聊(unknown)被误判成 ready_to_plan 触发重新规划
+            session_state.conversation_stage = "completed"
             session_state = session_state_service.append_recent_message(session_state, "assistant", summary)
             redis_session_repository.save(session_state)
             return AgentResponse(
@@ -259,6 +260,8 @@ class TravelOrchestrator:
             # 改稿后更新摘要：下一轮意图识别/再次改稿基于最新版本判断
             session_state.artifacts.plan_summary = build_plan_summary(revise_result.artifacts.plan.model_dump())
             summary = revise_result.summary or "已按你的要求更新行程。"
+            # 改稿完成，推进阶段（连续改稿仍靠 latest_plan_summary 判断，不受此影响）
+            session_state.conversation_stage = "completed"
             session_state = session_state_service.append_recent_message(session_state, "assistant", summary)
             redis_session_repository.save(session_state)
             return AgentResponse(
@@ -287,9 +290,12 @@ class TravelOrchestrator:
         elif intent.intent_type == "end_session":
             summary = intent.reasoning or "好的，祝你旅途愉快！再见。"
         else:
-            # qa（正常 AI 对话）：走真正的 LLM 自由对话，带行程摘要上下文
-            # LLM 不可用/失败时降级到 intent 的 reasoning 话术
-            summary = self._qa_chat_reply(agent_request.message, session_state) or intent.reasoning or "我已记录你的消息。"
+            # qa / unknown：正常走 LLM 自由对话，带行程摘要上下文
+            # LLM 不可用/失败时给友好引导，不把调试用 reasoning 暴露给用户
+            summary = self._qa_chat_reply(agent_request.message, session_state) or (
+                "你好！我是旅行规划助手，可以帮你规划旅行行程。"
+                "告诉我目的地、游玩日期和人数，我就能开始为你规划。"
+            )
         session_state = session_state_service.append_recent_message(session_state, "assistant", summary)
         redis_session_repository.save(session_state)
         return AgentResponse(
@@ -319,7 +325,7 @@ class TravelOrchestrator:
                 "days": plan_summary.get("days"),
                 "summary": (plan_summary.get("summary") or "")[:300],
             } if plan_summary else None,
-            "recent_messages": session_state.recent_messages[-6:],
+            "recent_messages": [m.model_dump() for m in session_state.recent_messages[-6:]],
             "user_message": user_message,
         }
         user_prompt = json.dumps(context_payload, ensure_ascii=False, indent=2)

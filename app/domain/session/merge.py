@@ -53,13 +53,8 @@ def merge_request_state(
     current_state: SessionRequestState | None,
     request_patch: dict[str, Any],
 ) -> SessionMergeResult:
-    # 以旧状态为基底（无旧状态时用空状态）
-    previous_state = current_state or SessionRequestState()
-    previous_dump = previous_state.model_dump()
-    next_dump = dict(previous_dump)  # 在副本上累加，不改原对象
-
-    applied_patch: dict[str, Any] = {}  # 本轮真正生效的 patch（过滤后）
-    changed_fields: list[str] = []       # 本轮发生变化的字段名
+    # 以旧状态为基底（无旧状态时用空状态），在副本上累加
+    next_dump = dict((current_state or SessionRequestState()).model_dump())
 
     # 逐字段合并 patch —— 这是 patch-only 累计的核心
     for field, value in request_patch.items():
@@ -80,8 +75,6 @@ def merge_request_state(
         normalized_value = list(value) if field in LIST_FIELDS else value
         if next_dump.get(field) != normalized_value:
             next_dump[field] = normalized_value
-            changed_fields.append(field)
-        applied_patch[field] = normalized_value
 
     # 用合并后的 dict 重建强类型对象（会做字段校验）
     next_state = SessionRequestState(**next_dump)
@@ -91,10 +84,7 @@ def merge_request_state(
     remaining_missing_fields = compute_missing_fields(next_state)
 
     return SessionMergeResult(
-        previous_state=previous_state,
-        applied_patch=applied_patch,
         next_state=next_state,
-        changed_fields=changed_fields,
         remaining_missing_fields=remaining_missing_fields,
     )
 

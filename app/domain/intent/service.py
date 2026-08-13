@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 
 from app.domain.intent.prompt import INTENT_RECOGNITION_SYSTEM_PROMPT, build_intent_recognition_prompt
@@ -12,21 +13,35 @@ from app.domain.intent.schema import (
 )
 from app.infrastructure.llm.client import get_llm_client
 
-class IntentRecognizer:
-    # ============================================================
-    # 入口：双路径意图识别
-    # 主路径：LLM 语义理解（prompt 已约束日期区间成对/目的地/人数解析，见 prompt.py）
-    # 兜底：仅当 LLM 不可用/超时/解析失败时，用规则 fallback 保证对话不中断
-    # 注意：规则 fallback 只是极端兜底，不是解析主力——口语语义（省略、区间、
-    # 跨月、中文数字等）永远优先交给 LLM 理解，不要靠正则逐字补齐。
-    # ============================================================
+logger = logging.getLogger(__name__)
 
-    # recognize 是 intent 模块的统一入口：优先走 LLM，失败再走最薄 fallback
+
+class IntentRecognizer:
+    # 双路径识别：LLM 语义理解优先（口语/区间/跨月等交给模型），失败走规则 fallback 兜底。
+
+    # recognize 是 intent 模块的统一入口：优先走 LLM，失败走 fallback，并记录识别结果
     def recognize(self, intent_input: IntentRecognitionInput) -> IntentRecognitionOutput:
         llm_result = self._recognize_with_llm(intent_input)
         if llm_result is not None:
+            logger.info(
+                "intent[llm] raw=%r -> intent=%s patch=%s missing=%s scope=%s",
+                intent_input.raw_message,
+                llm_result.intent_type,
+                llm_result.extracted_request_patch,
+                llm_result.missing_fields,
+                llm_result.revision_scope_hint,
+            )
             return llm_result
-        return self._fallback(intent_input)
+        fallback_result = self._fallback(intent_input)
+        logger.info(
+            "intent[fallback] raw=%r -> intent=%s patch=%s missing=%s scope=%s",
+            intent_input.raw_message,
+            fallback_result.intent_type,
+            fallback_result.extracted_request_patch,
+            fallback_result.missing_fields,
+            fallback_result.revision_scope_hint,
+        )
+        return fallback_result
 
     # 这里负责调用 LLM 做结构化意图识别
     def _recognize_with_llm(self, intent_input: IntentRecognitionInput) -> IntentRecognitionOutput | None:
@@ -42,24 +57,11 @@ class IntentRecognizer:
             return None
         return result
 
-    # fallback 只做最薄规则兜底：按优先级识别
-    #   end_session（告别）→ revise_plan（已有行程 + 改稿话术）→ confirm（确认话术）
-    #   → qa（问候/闲聊）→ clarification/new_plan（字段判定）→ unknown
-    # reject 依赖 LLM 判断（后续可补）
-    # 优先级设计意图（从高到低）：
-    #   1. end_session  告别语无条件优先——用户要走，别的都不重要
-    #   2. revise_plan  改稿是"动作性"最强的意图，且必须有已有行程才成立
-    #   3. confirm      确认当前行程（需要已有行程 + 确认话术 + 无新规划信号）
-    #   4. qa           闲聊/问答（无任何规划信号时才成立）
-    #   5. 字段判定      落到 clarification（缺字段）或 new_plan（字段齐）
-    #   6. unknown      以上都不满足
-    # ⚠️ 本方法是 LLM 不可用时的降级预案；日常运行应走 LLM 语义理解（prompt.py）
+    # fallback：LLM 不可用时的降级预案，按优先级识别
     def _fallback(self, intent_input: IntentRecognitionInput) -> IntentRecognitionOutput:
         raw_message = (intent_input.raw_message or "").strip()
-
         # 本轮 patch 只从原话解析（日期/人数/目的地），不再把已累计 request 全量当 patch
         request_patch = self._parse_patch_from_message(intent_input)
-
         # ---- 判定优先级 1：end_session ----
         # 结束语无条件优先：再见/拜拜/结束/退出
         if _is_end_session_message(raw_message):
@@ -68,7 +70,16 @@ class IntentRecognizer:
                 reasoning="好的，祝你旅途愉快！再见。",
             )
 
-        # ---- 判定优先级 2：revise_plan ----
+        # ---- 判定优先级 2：reject ----
+        # 用户明确表示"算了/不用了"：优先于 revise 与字段判定，
+        # 避免拒绝被误判为 new_plan 重新规划或 clarification 追问
+        if _is_reject_message(raw_message):
+            return IntentRecognitionOutput(
+                intent_type="reject",
+                reasoning="好的，那就不规划了。有需要随时找我。",
+            )
+
+        # ---- 判定优先级 3：revise_plan ----
         # 需要"已有行程"上下文（latest_plan_summary 或 session 阶段/修订计数），
         # 且原话含改稿话术（换成/调整/第N天改...）
         if self._has_existing_plan(intent_input) and _is_revision_message(raw_message):
@@ -80,7 +91,7 @@ class IntentRecognizer:
                 reasoning="LLM intent 识别不可用，根据已有行程 + 改稿话术判定为 revise_plan。",
             )
 
-        # ---- 判定优先级 3：confirm ----
+        # ---- 判定优先级 4：confirm ----
         # 已有行程 + 确认话术（可以/没问题/就这样）→ 确认当前行程
         # 注意：确认话术里若带规划信号（如"好的，8月10号"），应走字段判定而非 confirm
         if (
@@ -93,7 +104,7 @@ class IntentRecognizer:
                 reasoning="好的，行程已确认。",
             )
 
-        # ---- 判定优先级 4：qa ----
+        # ---- 判定优先级 5：qa ----
         # 问候/闲聊/感谢，且原话不含任何规划信号（目的地/日期/人数）
         if _is_qa_message(raw_message):
             return IntentRecognitionOutput(
@@ -101,7 +112,7 @@ class IntentRecognizer:
                 reasoning="LLM intent 识别不可用，按问候/闲聊关键词判定为 qa。",
             )
 
-        # ---- 判定优先级 5：按字段缺失判定 clarification / new_plan ----
+        # ---- 判定优先级 6：按字段缺失判定 clarification / new_plan ----
         # 合并"历史累计需求 + 本轮解析 patch"，得到解析后的需求视图，据此判断还缺什么
         # 这样即使第一轮还没有结构化 request（如"我想去北京玩"），也能靠解析出的 patch 判 clarification
         merged_payload: dict[str, object] = {}
@@ -152,10 +163,10 @@ class IntentRecognizer:
         #    注意：planning/qa 阶段不在此列——planning 是规划执行中，qa 不保证有行程
         if intent_input.latest_plan_summary:
             return True
-        ctx = intent_input.session_context or {}
-        if bool(ctx.get("revision_count")):
+        ctx = intent_input.session_context
+        if ctx.revision_count:
             return True
-        return ctx.get("conversation_stage") in ("revise_ready", "revise_collecting", "completed", "closed")
+        return ctx.conversation_stage in ("revise_ready", "revise_collecting", "completed", "closed")
 
     # 当前先把“目的地 + 游玩日期”作为关键字段；预算暂时不强制要求
     # 字段集合与 schema 层 REQUIRED_PATCH_FIELDS 同源，保持 intent 内部口径一致
@@ -344,13 +355,32 @@ def extract_destination(message: str) -> str | None:
 # fallback 意图判定辅助（模块级纯函数，可独立单测）
 # ============================================================
 
-# 强改稿信号：出现即判定为改稿（无需对象词）
-_REVISION_STRONG_KEYWORDS = ("换成", "改成", "改到", "调整", "修改", "优化", "更新", "去掉", "删除", "取消", "调整一下")
+def _compile_keywords(*keywords: str) -> re.Pattern[str]:
+    """把关键词组编译成"任一命中"的正则，替代散落的 any(kw in text)。"""
+    return re.compile("|".join(re.escape(kw) for kw in keywords))
 
+
+# 强改稿信号：出现即判定为改稿（无需对象词）
+_REVISION_STRONG_RE = _compile_keywords("换成", "改成", "改到", "调整", "修改", "优化", "更新", "去掉", "删除", "取消", "调整一下")
 # 弱改稿动词："改/换" 需要配合行程对象词才判定，避免"改天/换话题"误判
-_REVISION_WEAK_VERBS = ("改", "换")
-_REVISION_OBJECT_WORDS = (
-    "天", "行程", "安排", "住宿", "酒店", "交通", "节奏", "顺序", "景点", "餐厅", "预算", "方案", "路线",
+_REVISION_WEAK_RE = _compile_keywords("改", "换")
+_REVISION_OBJECT_RE = _compile_keywords("天", "行程", "安排", "住宿", "酒店", "交通", "节奏", "顺序", "景点", "餐厅", "预算", "方案", "路线")
+
+# reject 关键词：明确拒绝继续规划（"算了/不用了"等）
+# 注意：不含"取消"——"取消"可能指取消某天/某景点（revise 语义），避免与 revise 强关键词"取消"冲突
+_REJECT_RE = _compile_keywords("不用了", "不要了", "不规划了", "不需要", "不做了", "算了")
+
+# end_session 关键词：结束会话的告别语
+_END_SESSION_RE = _compile_keywords("再见", "拜拜", "结束", "退出", "不聊了", "下次再聊", "就到这里")
+
+# confirm 关键词：确认当前行程（注意与澄清过程的"好的"区分，见 _is_confirm_message）
+_CONFIRM_RE = _compile_keywords("没问题", "就这样", "可以", "好的", "行", "确认", "挺好", "不错", "ok")
+
+# qa 关键词：问候/闲聊/感谢/能力询问。注意与规划信号互斥（见 _is_qa_message）
+_QA_RE = _compile_keywords(
+    "你好", "您好", "嗨", "哈喽", "hello", "hi", "在吗",
+    "谢谢", "感谢", "辛苦了", "太棒了", "不错",
+    "你是谁", "叫什么", "能做什么", "会什么", "怎么用", "介绍一下", "有什么功能", "什么功能",
 )
 
 
@@ -364,10 +394,10 @@ def _is_revision_message(message: str) -> bool:
     """
     if "改天" in message or "改日" in message:
         return False
-    if any(kw in message for kw in _REVISION_STRONG_KEYWORDS):
+    if _REVISION_STRONG_RE.search(message):
         return True
-    if any(verb in message for verb in _REVISION_WEAK_VERBS):
-        return any(obj in message for obj in _REVISION_OBJECT_WORDS)
+    if _REVISION_WEAK_RE.search(message):
+        return _REVISION_OBJECT_RE.search(message) is not None
     return False
 
 
@@ -384,23 +414,20 @@ def _infer_revision_scope(message: str) -> str:
     return "block_level"
 
 
-# end_session 关键词：结束会话的告别语
-_END_SESSION_KEYWORDS = ("再见", "拜拜", "结束", "退出", "不聊了", "下次再聊", "就到这里")
+def _is_reject_message(message: str) -> bool:
+    """判断原话是否为明确拒绝（fallback 专用）。"""
+    return _REJECT_RE.search(message) is not None
 
 
 def _is_end_session_message(message: str) -> bool:
-    return any(kw in message for kw in _END_SESSION_KEYWORDS)
-
-
-# confirm 关键词：确认当前行程（注意与澄清过程的"好的"区分，见 _is_confirm_message）
-_CONFIRM_KEYWORDS = ("没问题", "就这样", "可以", "好的", "行", "确认", "挺好", "不错", "OK", "ok")
+    return _END_SESSION_RE.search(message) is not None
 
 
 def _is_confirm_message(message: str) -> bool:
     lowered = message.lower()
     if "不行" in lowered or "行不行" in lowered:
         return False
-    return any(kw in lowered for kw in _CONFIRM_KEYWORDS)
+    return _CONFIRM_RE.search(lowered) is not None
 
 
 def _has_planning_signal(message: str) -> bool:
@@ -419,28 +446,12 @@ def _has_planning_signal(message: str) -> bool:
     return False
 
 
-# qa 关键词：问候/闲聊/感谢/能力询问。注意与规划信号互斥（见 _is_qa_message）
-_QA_KEYWORDS = (
-    "你好", "您好", "嗨", "哈喽", "hello", "hi", "在吗",
-    "谢谢", "感谢", "辛苦了", "太棒了", "不错",
-    "你是谁", "叫什么", "能做什么", "会什么", "怎么用", "介绍一下", "有什么功能", "什么功能",
-)
-
-
 def _is_qa_message(message: str) -> bool:
     """判断原话是否为闲聊/问答（fallback 专用）。
 
     规则：命中 qa 关键词，且不含任何规划信号（目的地/日期/人数）。
     这样"你好，8月10号到12号去北京"会优先走规划判定，而不是被误判为 qa。
     """
-    lowered = message.lower()
-    if not any(kw in lowered for kw in _QA_KEYWORDS):
+    if not _QA_RE.search(message.lower()):
         return False
-    start_date, end_date = extract_dates(message)
-    if start_date or end_date:
-        return False
-    if extract_travelers(message):
-        return False
-    if extract_destination(message):
-        return False
-    return True
+    return not _has_planning_signal(message)

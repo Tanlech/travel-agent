@@ -1,27 +1,13 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
-
-# 会话阶段枚举：尽量把“当前在做什么”说得更具体一点
-ConversationStage = Literal[
-    "collecting_destination",   # 还在补目的地
-    "collecting_dates",         # 目的地已知，但还在补游玩日期
-    "collecting_requirements",  # 目的地和日期已知后，继续补其他信息
-    "clarification",            # 追问用户补齐关键信息
-    "ready_to_plan",            # 关键字段齐了，准备进入规划
-    "planning",                 # 正在生成规划
-    "revise_collecting",        # 修改已有行程时，正在收集改稿信息
-    "revise_ready",             # 改稿信息已基本齐备，准备进入修改
-    "qa",                       # 当前是问答模式
-    "completed",                # 当前会话目标已完成
-    "closed",                   # 会话关闭
-]
-
-SessionIntentType = Literal["new_plan", "revise_plan", "clarification", "qa", "confirm", "reject", "end_session", "unknown"]
-SessionRevisionScope = Literal["block_level", "day_level", "global"]
+from app.domain.intent.schema import ChatMessage, normalize_date
+from app.domain.intent_type import IntentType, RevisionScope
+from app.domain.session_context import SessionContextView
+from app.domain.stage import ConversationStage
 
 
 class SessionRequestState(BaseModel):
@@ -40,32 +26,39 @@ class SessionRequestState(BaseModel):
     optional_spots: list[str] = Field(default_factory=list)
     avoid_spots: list[str] = Field(default_factory=list)
 
+    @field_validator("days", "travelers")
+    @classmethod
+    def _check_positive_int(cls, v: int | None) -> int | None:
+        # 与 intent 层 IntentPlanningRequest 口径一致：0/负值会污染下游状态
+        if v is not None and v <= 0:
+            raise ValueError("days/travelers must be positive integers")
+        return v
+
+    @model_validator(mode="after")
+    def _normalize_dates(self) -> "SessionRequestState":
+        # 复用 intent 层 normalize_date，统一日期合法性 + 跨年校验口径
+        for field in ("start_date", "end_date"):
+            value = getattr(self, field)
+            if not value:
+                continue
+            normalized = normalize_date(value)
+            if normalized is None:
+                raise ValueError(f"invalid {field} {value!r}, expected YYYY-MM-DD")
+            setattr(self, field, normalized)
+        # 区间方向修正：end 早于 start（历史脏数据）时对调
+        if self.start_date and self.end_date and self.end_date < self.start_date:
+            self.start_date, self.end_date = self.end_date, self.start_date
+        return self
+
 
 class SessionArtifactSummary(BaseModel):
     # 当前会话中已生成产物的轻量摘要（revise 判定依赖 plan_summary）
     plan_summary: dict[str, Any] | None = None
 
-    # 产物状态是否存在，避免只靠 summary 空不空来判断
-    has_current_plan: bool = False
-    has_current_draft: bool = False
-
-    # 产物版本/轮次信息，后续如果要做版本化可以继续扩展
-    plan_revision_count: int = 0
-    draft_revision_count: int = 0
-
 
 class SessionMergeResult(BaseModel):
-    # merge 前的完整状态
-    previous_state: SessionRequestState
-
-    # 本轮真正应用的 patch
-    applied_patch: dict[str, Any] = Field(default_factory=dict)
-
     # merge 后的新完整状态
     next_state: SessionRequestState
-
-    # 本轮发生变化的字段名
-    changed_fields: list[str] = Field(default_factory=list)
 
     # merge 后仍然缺哪些关键字段
     remaining_missing_fields: list[str] = Field(default_factory=list)
@@ -81,12 +74,6 @@ class SessionState(BaseModel):
     # 截止当前轮的完整需求状态
     current_request_state: SessionRequestState = Field(default_factory=SessionRequestState)
 
-    # 当前这一轮新增/修改的 patch
-    current_turn_patch: dict[str, Any] = Field(default_factory=dict)
-
-    # 最近一次 merge 后还缺哪些字段
-    missing_fields_snapshot: list[str] = Field(default_factory=list)
-
     # 系统后续准备追问哪些字段
     pending_questions: list[str] = Field(default_factory=list)
 
@@ -94,7 +81,7 @@ class SessionState(BaseModel):
     artifacts: SessionArtifactSummary = Field(default_factory=SessionArtifactSummary)
 
     # 最近几轮消息摘要，后续可给 intent 使用
-    recent_messages: list[dict[str, str]] = Field(default_factory=list)
+    recent_messages: list[ChatMessage] = Field(default_factory=list)
 
     revision_count: int = 0
 
@@ -104,9 +91,9 @@ class SessionState(BaseModel):
 
 class SessionIntentResult(BaseModel):
     # 这里是 session 层消费的 intent 结果快照，不直接依赖 intent 模块 schema
-    intent_type: SessionIntentType = "unknown"
+    intent_type: IntentType = "unknown"
     extracted_request_patch: dict[str, Any] = Field(default_factory=dict)
-    revision_scope_hint: SessionRevisionScope | None = None
+    revision_scope_hint: RevisionScope | None = None
     missing_fields: list[str] = Field(default_factory=list)
     should_load_existing_artifacts: bool = False
     reasoning: str | None = None
@@ -126,7 +113,7 @@ class SessionApplyIntentResult(BaseModel):
 class SessionIntentView(BaseModel):
     # 从 session 层投影给 intent 层的上下文视图
     planning_request: dict[str, Any] = Field(default_factory=dict)
-    session_context: dict[str, Any] = Field(default_factory=dict)
+    session_context: SessionContextView = Field(default_factory=SessionContextView)
     artifacts: SessionArtifactSummary = Field(default_factory=SessionArtifactSummary)
-    recent_messages: list[dict[str, str]] = Field(default_factory=list)
+    recent_messages: list[ChatMessage] = Field(default_factory=list)
     pending_questions: list[str] = Field(default_factory=list)

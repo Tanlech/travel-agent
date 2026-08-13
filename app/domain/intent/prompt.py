@@ -34,7 +34,7 @@ INTENT_RECOGNITION_SYSTEM_PROMPT = """
 根据语义判断属于：new_plan / revise_plan / clarification / qa / confirm / reject / end_session / unknown。
 - 已有行程（latest_plan_summary 非空即代表已有行程；或 session_context 显示已规划过）且在对行程提修改 → revise_plan，并给 revision_scope_hint（block_level/day_level/global）。
 - 用户补充字段 → 放进 extracted_request_patch；关键字段仍缺（destination/start_date/end_date）→ missing_fields 列出。
-- 纯确认/告别/闲聊/拒绝 → confirm / end_session / qa / reject，不提取 patch。
+- 纯确认/告别/闲聊/拒绝（"算了"、"不用了"、"不规划了"）→ confirm / end_session / qa / reject，不提取 patch。
 - 无法判断 → unknown，不要硬猜。
 
 五、输出约束（严格遵守）

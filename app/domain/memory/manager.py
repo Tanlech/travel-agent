@@ -24,12 +24,11 @@ class MemoryManager:
         if any(any(keyword in item for keyword in ["夜游", "夜景", "演艺"]) for item in preferences):
             accept_nightlife = True
 
-        traveler_text = " ".join(request.travelers)
         family_friendly = stored.family_friendly if stored else None
-        if any(keyword in traveler_text.lower() for keyword in ["child", "kids", "family", "亲子", "儿童"]):
+        if any(any(keyword in item.lower() for keyword in ("亲子", "儿童", "带娃", "带小孩", "family", "kids")) for item in preferences):
             family_friendly = True
         senior_friendly = stored.senior_friendly if stored else None
-        if any(keyword in traveler_text.lower() for keyword in ["senior", "elder", "老人"]):
+        if any(any(keyword in item.lower() for keyword in ("老人", "长辈", "父母", "银发", "senior", "elder")) for item in preferences):
             senior_friendly = True
 
         preferred_styles = list(dict.fromkeys((stored.preferred_styles if stored else []) + preferences))
@@ -57,7 +56,7 @@ class MemoryManager:
             session_id=session_id,
             confirmed_fields=confirmed_fields,
             pending_questions=list(stored.pending_questions) if stored else [],
-            conversation_stage=stored.conversation_stage if stored else "new_plan",
+            conversation_stage=stored.conversation_stage if stored else "collecting_destination",
             last_destination=stored.last_destination if stored else request.destination,
             revision_count=stored.revision_count if stored else 0,
         )

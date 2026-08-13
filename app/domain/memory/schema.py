@@ -4,6 +4,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from app.domain.stage import ConversationStage
+
 
 class UserMemory(BaseModel):
     user_id: str | None = None
@@ -20,7 +22,7 @@ class SessionMemory(BaseModel):
     session_id: str | None = None
     confirmed_fields: list[str] = Field(default_factory=list)
     pending_questions: list[str] = Field(default_factory=list)
-    conversation_stage: str = "new_plan"
+    conversation_stage: ConversationStage = "collecting_destination"
     last_destination: str | None = None
     revision_count: int = 0
     current_plan: dict[str, Any] | None = None

@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 from app.agents.orchestrator import travel_orchestrator
 from app.agents.schema.orchestrator import AgentRequest
-from app.domain.session.repository_impl import redis_session_repository
+from app.domain.session.repository import redis_session_repository
 from app.infrastructure.redis_client import get_redis
 
 
@@ -70,7 +70,7 @@ def get_session(session_id: str) -> dict:
         "stage": st.conversation_stage,
         "revision_count": st.revision_count,
         "current_request": st.current_request_state.model_dump(),
-        "recent_messages": st.recent_messages,
+        "recent_messages": [m.model_dump() for m in st.recent_messages],
         "has_plan": bool(plan),
         "has_draft": bool(draft),
     }

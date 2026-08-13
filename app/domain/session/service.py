@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from app.domain.intent.schema import ChatMessage
 from app.domain.session.merge import merge_request_state
 from app.domain.session.schema import SessionApplyIntentResult, SessionIntentResult, SessionState
 
@@ -28,26 +29,15 @@ class SessionStateService:
 
         # 3. 把 merge 结果写回 session 各字段
         next_session.current_request_state = merge_result.next_state          # 累计后的完整需求
-        next_session.current_turn_patch = merge_result.applied_patch          # 本轮实际生效的 patch
-        next_session.missing_fields_snapshot = merge_result.remaining_missing_fields  # 还缺什么
-        next_session.pending_questions = list(merge_result.remaining_missing_fields)  # 待追问字段（暂同 missing）
+        next_session.pending_questions = list(merge_result.remaining_missing_fields)  # 待追问字段
 
         # 4. 状态机：根据 intent_type + missing + 当前阶段，决定下一阶段
+        #    （new_plan + 字段齐 会在 _decide_stage 内返回 ready_to_plan）
         next_session.conversation_stage = self._decide_stage(next_session, intent_result, merge_result.remaining_missing_fields)
 
-        # 5. 兜底：new_plan 且字段齐 → 强制 ready_to_plan（防止 _decide_stage 分支顺序导致漏判）
-        if intent_result.intent_type == "new_plan" and not merge_result.remaining_missing_fields:
-            next_session.conversation_stage = "ready_to_plan"
-
-        # 6. 产物标记：intent 要求加载已有行程时，标记 has_current_plan/draft
-        next_session.artifacts.has_current_plan = next_session.artifacts.has_current_plan or intent_result.should_load_existing_artifacts
-        next_session.artifacts.has_current_draft = next_session.artifacts.has_current_draft or intent_result.should_load_existing_artifacts
-
-        # 7. 改稿计数：revise_plan 时递增（后续可用于限制最大改稿次数等策略）
+        # 5. 改稿计数：revise_plan 时递增（后续可用于限制最大改稿次数等策略）
         if intent_result.intent_type == "revise_plan":
             next_session.revision_count += 1
-            next_session.artifacts.plan_revision_count += 1
-            next_session.artifacts.draft_revision_count += 1
 
         next_session.updated_at = self._now_iso()
 
@@ -62,7 +52,7 @@ class SessionStateService:
     def append_recent_message(self, session_state: SessionState, role: str, content: str, max_items: int = 8) -> SessionState:
         next_session = session_state.model_copy(deep=True)
         if content.strip():
-            next_session.recent_messages.append({"role": role, "content": content})
+            next_session.recent_messages.append(ChatMessage(role=role, content=content))
         if len(next_session.recent_messages) > max_items:
             next_session.recent_messages = next_session.recent_messages[-max_items:]
         next_session.updated_at = self._now_iso()
@@ -97,17 +87,9 @@ class SessionStateService:
         # 字段齐 + 明确新规划 → ready_to_plan
         if intent_result.intent_type == "new_plan":
             return "ready_to_plan"
-        # 兜底1：intent_type 是 confirm/reject/unknown 等未显式处理的，保持当前阶段
-        if session_state.conversation_stage in {"planning", "qa", "revise_collecting", "revise_ready", "completed", "closed"}:
-            return session_state.conversation_stage
-        # 兜底2：按已有字段推断阶段（防止 intent 漏判时仍能给出合理阶段）
-        if session_state.current_request_state.destination and session_state.current_request_state.start_date and session_state.current_request_state.end_date:
-            return "ready_to_plan"
-        if not session_state.current_request_state.destination:
-            return "collecting_destination"
-        if not session_state.current_request_state.start_date or not session_state.current_request_state.end_date:
-            return "collecting_dates"
-        return "collecting_requirements"
+        # unknown 及其他未显式处理的意图：保持当前阶段，不主动按字段推断，
+        # 避免"字段恰好齐 + 一句闲聊(unknown)"被误判成 ready_to_plan 触发重新规划
+        return session_state.conversation_stage
 
     def _now_iso(self) -> str:
         return datetime.now(timezone.utc).isoformat()

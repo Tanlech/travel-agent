@@ -2,27 +2,12 @@ from __future__ import annotations
 
 import re
 from datetime import date, datetime
-from enum import StrEnum
-from typing import Any, Literal, get_args, get_origin
+from typing import Any, get_args, get_origin
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-
-class IntentType(StrEnum):
-    """意图类型（成员值即序列化值）。"""
-
-    NEW_PLAN = "new_plan"            # 新一轮规划（首次/重新给足信息）
-    REVISE_PLAN = "revise_plan"      # 修改已有行程（换/调/改）
-    CLARIFICATION = "clarification"  # 信息不齐，还需追问补全
-    QA = "qa"                        # 闲聊/问答（问候、感谢、能力询问）
-    CONFIRM = "confirm"              # 确认当前行程，收尾会话
-    REJECT = "reject"                # 拒绝（不用了/算了），仅 LLM 路径支持
-    END_SESSION = "end_session"      # 结束会话（再见/拜拜）
-    UNKNOWN = "unknown"              # 兜底：无法可靠判断
-
-
-# 改动范围：局部块 / 单日 / 全局
-RevisionScope = Literal["block_level", "day_level", "global"]
+from app.domain.intent_type import IntentType, RevisionScope
+from app.domain.session_context import SessionContextView
 
 
 class IntentPlanningRequest(BaseModel):
@@ -42,6 +27,15 @@ class IntentPlanningRequest(BaseModel):
     must_visit_spots: list[str] = Field(default_factory=list)
     optional_spots: list[str] = Field(default_factory=list)
     avoid_spots: list[str] = Field(default_factory=list)
+
+    @field_validator("days", "travelers")
+    @classmethod
+    def _check_positive_int(cls, v: int | None) -> int | None:
+        # days/travelers 必须为正整数（0/负值会污染下游 merge 与天数推导）
+        # None 表示"未提供"，放行；缺失字段由 merge 层按需追问
+        if v is not None and v <= 0:
+            raise ValueError("days/travelers must be positive integers")
+        return v
 
     @model_validator(mode="after")
     def _normalize_dates(self) -> "IntentPlanningRequest":
@@ -76,7 +70,7 @@ class IntentRecognitionInput(BaseModel):
 
     raw_message: str = Field(min_length=1)  # 用户原话，空白直接拒绝
     planning_request: IntentPlanningRequest | None = None  # 当前结构化需求（上下文）
-    session_context: dict[str, Any] = Field(default_factory=dict)  # 会话状态（规划/补信息/改稿）
+    session_context: SessionContextView = Field(default_factory=SessionContextView)  # 会话状态（阶段/改稿次数）
     user_context: dict[str, Any] = Field(default_factory=dict)  # 用户长期偏好
     latest_plan_summary: dict[str, Any] | None = None  # 已有行程摘要（revise 判定依据）
     recent_messages: list[ChatMessage] = Field(default_factory=list)
@@ -148,9 +142,12 @@ class IntentRecognitionOutput(BaseModel):
                 f"{self.reasoning or ''}（归一：clarification 无缺失字段，降级为 new_plan）"
             ).strip()
 
-        # 4. 一致性：scope 只属于 revise；纯对话/收尾类意图不承载需求字段
+        # 4. 一致性：scope 与"加载已有行程"标记只属于 revise；
+        #    非 revise 意图（new_plan/clarification/qa/confirm/reject/end_session/unknown）
+        #    一律清空，避免 LLM 误带标记污染 session 层的 has_current_plan 判定
         if self.intent_type != IntentType.REVISE_PLAN:
             self.revision_scope_hint = None
+            self.should_load_existing_artifacts = False
         if self.intent_type in (
             IntentType.QA,
             IntentType.CONFIRM,
@@ -270,9 +267,11 @@ def _clean_field_value(field: str, value: Any) -> Any | None:
                 if stripped not in items:
                     items.append(stripped)
         return items or None
-    # 整数：兼容数字字符串；days/travelers 必须为正整数
+    # 整数：兼容数字字符串与整数 float（如 3.0）；days/travelers 必须为正整数
     if field in _INT_PATCH_FIELDS:
-        if isinstance(value, bool) or not isinstance(value, (int, str)):
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            return None
+        if isinstance(value, float) and not value.is_integer():
             return None
         try:
             int_value = int(value)

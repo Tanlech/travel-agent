@@ -117,7 +117,7 @@ def build_follow_up_question(pending_questions: list[str]) -> str:
 
 def stage_to_execution_mode(stage: str) -> str:
     """把 SessionState 的 conversation_stage 映射成 ExecutionPlan.mode。"""
-    if stage in {"collecting_destination", "collecting_dates", "collecting_requirements", "clarification"}:
+    if stage in {"collecting_destination", "collecting_dates", "collecting_requirements"}:
         return "clarify"
     if stage == "ready_to_plan":
         return "planning"

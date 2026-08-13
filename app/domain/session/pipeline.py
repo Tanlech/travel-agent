@@ -3,11 +3,41 @@ from __future__ import annotations
 from typing import Any
 
 from app.domain.intent.adapter import adapt_session_view_to_intent_input
-from app.domain.intent.schema import IntentRecognitionInput, IntentRecognitionOutput, IntentType
+from app.domain.intent.schema import IntentRecognitionInput, IntentRecognitionOutput
 from app.domain.intent.service import IntentRecognizer, intent_recognizer
-from app.domain.session.adapter import adapt_intent_result_to_session, adapt_session_state_to_intent_view
-from app.domain.session.schema import SessionApplyIntentResult, SessionIntentResult, SessionState
+from app.domain.intent_type import IntentType
+from app.domain.session_context import SessionContextView
+from app.domain.session.schema import SessionApplyIntentResult, SessionIntentResult, SessionIntentView, SessionState
 from app.domain.session.service import SessionStateService, session_state_service
+
+
+def adapt_intent_result_to_session(payload: Any) -> SessionIntentResult:
+    """把 intent 模块输出转成 session 层可消费的契约。
+
+    mode="json" 把 StrEnum（intent 层）等内部类型转成纯 JSON 值，
+    避免枚举对象传入 session 的 Literal 字段产生兼容问题。
+    """
+    if isinstance(payload, SessionIntentResult):
+        return payload
+    if hasattr(payload, "model_dump"):
+        return SessionIntentResult(**payload.model_dump(mode="json"))
+    if isinstance(payload, dict):
+        return SessionIntentResult(**payload)
+    raise TypeError("Unsupported intent result payload for session adaptation.")
+
+
+def adapt_session_state_to_intent_view(session_state: SessionState) -> SessionIntentView:
+    """把 SessionState 投影成 intent 可消费的轻量视图，隐藏 session 内部细节。"""
+    return SessionIntentView(
+        planning_request=session_state.current_request_state.model_dump(),
+        session_context=SessionContextView(
+            conversation_stage=session_state.conversation_stage,
+            revision_count=session_state.revision_count,
+        ),
+        artifacts=session_state.artifacts.model_copy(deep=True),
+        recent_messages=list(session_state.recent_messages),
+        pending_questions=list(session_state.pending_questions),
+    )
 
 
 class IntentSessionPipeline:
@@ -16,7 +46,6 @@ class IntentSessionPipeline:
     # 分工：
     #   - intent 层：只做"理解"（判意图 + 提取本轮 patch），不碰会话状态
     #   - session 层：只做"累积"（merge patch + 状态机推进），不直接调用 LLM
-    #   - pipeline：纯编排，两个方向都用 adapter 解耦，避免层间互相 import
     def __init__(
         self,
         *,
@@ -45,7 +74,6 @@ class IntentSessionPipeline:
             )
 
         # 步骤1：把 session 完整状态投影成 intent 可消费的轻量视图
-        # 只取 planning_request/stage/artifacts/recent_messages，剥离 session 内部细节
         session_view = adapt_session_state_to_intent_view(session_state)
 
         # 步骤2：视图 + 本轮用户原话 + 用户偏好 → 拼成 LLM 能看的 intent 输入
@@ -61,8 +89,7 @@ class IntentSessionPipeline:
         # 步骤3：调意图识别（LLM 优先，失败走 fallback），得到 intent_type + 本轮 patch
         intent_output = self.intent_service.recognize(intent_input)
 
-        # 步骤4：把 intent 模块输出 schema 转成 session 层可消费的 SessionIntentResult
-        # 解耦：session 不直接依赖 intent 的 schema 类，只认自己的 contract
+        # 步骤4：把 intent 模块输出转成 session 层可消费的 SessionIntentResult
         session_intent_result = adapt_intent_result_to_session(intent_output)
 
         # 步骤5：应用到 session —— merge patch 进累计需求 + 状态机决定下一阶段

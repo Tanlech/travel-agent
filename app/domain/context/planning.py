@@ -3,17 +3,21 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 from app.agents.schema import ReflectionResult, TripPlan
+from app.agents.schema.planning import PlanningRequest
 from app.domain.context.session import SessionContext
 from app.domain.context.user import UserContext
 from app.infrastructure.llm.schemas import ItineraryDraftSchema
-from app.agents.schema.planning import PlanningRequest
 from app.tools.schema.attraction import AttractionResult
 from app.tools.schema.lodging import LodgingResult, SelectedLodging
 from app.tools.schema.transport import TransportResult
 from app.tools.schema.weather import WeatherResult
 
+"""规划全流程状态容器（planning / repair / reflection / revise 共享传递）"""
+
 
 class PlanningContext(BaseModel):
+    """一次规划任务的完整状态：请求 + 用户/会话视图 + 工具结果 + 中间产物"""
+
     request: PlanningRequest
     user: UserContext = Field(default_factory=UserContext)
     session: SessionContext = Field(default_factory=SessionContext)
@@ -22,9 +26,9 @@ class PlanningContext(BaseModel):
     lodging_result: LodgingResult | None = None
     selected_lodging: SelectedLodging | None = None
     transport_results: list[TransportResult] = Field(default_factory=list)
-    draft: ItineraryDraftSchema | None = None
-    plan: TripPlan | None = None
+    draft: ItineraryDraftSchema | None = None  # 行程稿（中间产物）
+    plan: TripPlan | None = None  # 对外行程结果
     reflection_result: ReflectionResult | None = None
-    status: str = "initialized"
+    status: str = "initialized"  # initialized / planning / completed
     revision_count: int = 0
-    trace: list[dict] = Field(default_factory=list)
+    trace: list[dict] = Field(default_factory=list)  # 步骤日志

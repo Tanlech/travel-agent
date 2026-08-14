@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import re
+from datetime import datetime, timezone
 from uuid import uuid4
 
 from app.agents.planning import planning_agent
@@ -66,13 +68,27 @@ class PlanningOrchestrator:
         if not missing:
             return (
                 DialogueDecision(status="ready_to_plan"),
-                ResponseContext(response_mode="final_plan", needs_follow_up=False),
+                ResponseContext(response_mode="final_plan"),
             )
         question = "请补充以下信息后我再开始规划：" + "、".join(field_labels.get(f, f) for f in missing)
         return (
             DialogueDecision(status="need_clarification", missing_fields=missing, follow_up_question=question),
-            ResponseContext(response_mode="follow_up", needs_follow_up=True, include_alternatives=False),
+            ResponseContext(response_mode="follow_up", include_alternatives=False),
         )
+
+
+# 空泛改稿预检：具体修改动词（命中即认为原话含修改指令）。
+# 典型空泛表达（"改一下"/"修改"/"调整下"）由 _EMPTY_REVISE_PATTERN 单独拦截，
+# 避免"改一下"因命中动词而被误判为有具体指令。
+_REVISION_SIGNAL_KEYWORDS = (
+    "改", "换", "调整", "修改", "更改", "删", "去掉", "增加", "添加",
+    "提前", "推迟", "延长", "缩短", "重新", "优化",
+)
+
+# 仅由"修改动词 + 可选语气词"构成、不含具体宾语的空泛改稿（如"改一下"/"修改"/"调整下"）
+_EMPTY_REVISE_PATTERN = re.compile(
+    r"^(?:修改|调整|改|换|优化|更改|变更|重排|重做)(?:一下|下|一改|一换|吧|呗|点|了|一遍)?$"
+)
 
 
 class TravelOrchestrator:
@@ -142,19 +158,24 @@ class TravelOrchestrator:
             if plan:
                 # 生成新摘要供下一轮意图识别使用（覆盖旧值）
                 session_state.artifacts.plan_summary = build_plan_summary(plan.model_dump())
+                # 产物标记：已成功生成，revise 分支据此区分"从未生成"与"产物丢失"
+                session_state.artifacts.has_plan = True
+                session_state.artifacts.plan_updated_at = datetime.now(timezone.utc)
             # 规划完成，推进阶段，避免后续闲聊(unknown)被误判成 ready_to_plan 触发重新规划
             session_state.conversation_stage = "completed"
             session_state = session_state_service.append_recent_message(session_state, "assistant", summary)
-            # 原子提交：state 与产物同事务，冲突整体回滚，避免"新 plan + 旧摘要"错位
-            saved = (
-                redis_session_repository.save_with_artifacts(
+            # 原子提交：state 与产物同事务，冲突整体回滚，避免"新 plan + 旧摘要"错位；
+            # 冲突时以最新会话为基底重试，避免产物静默丢失导致下次请求重复规划。
+            # plan 为 None（规划失败）时不动产物，仅保存 state（保留既有产物）
+            if plan:
+                saved, session_state = self._commit_artifacts_with_retry(
                     session_state,
                     plan.model_dump(),
                     draft.model_dump() if draft else None,
+                    summary,
                 )
-                if plan
-                else redis_session_repository.save(session_state)
-            )
+            else:
+                saved = redis_session_repository.save(session_state)
             if not saved:
                 app_logger.warning(
                     "session_save_conflict_dropped",
@@ -182,7 +203,16 @@ class TravelOrchestrator:
                 prefetched_artifacts if prefetched_artifacts is not None else redis_session_repository.load_artifacts(session_id)
             )
             if not plan_payload or not draft_payload:
-                msg = "当前会话还没有可修改的行程，请先让我为你生成一份。"
+                # 区分"从未生成过行程"与"产物已过期丢失"，给出不同引导
+                if session_state.artifacts.has_plan:
+                    msg = "之前的行程数据已过期，请让我重新为你生成一份。"
+                    # 产物已丢：连摘要一起清空，避免意图层仍凭 plan_summary 判定"已有行程"
+                    # 导致下一轮 revise 又走进这里，形成"反复提示已过期"的死循环
+                    session_state.artifacts.has_plan = False
+                    session_state.artifacts.plan_summary = None
+                    session_state.artifacts.plan_updated_at = None
+                else:
+                    msg = "当前会话还没有可修改的行程，请先让我为你生成一份。"
                 session_state = session_state_service.append_recent_message(session_state, "assistant", msg)
                 self._save_or_log(session_state, request_id=agent_request.request_id, trace_id=trace_id)
                 return AgentResponse(
@@ -196,6 +226,25 @@ class TravelOrchestrator:
                 )
             planning_request = session_state_to_planning_request(session_state)
             session_context = session_state_to_session_context(session_state)
+
+            # 空泛改稿预检：既没提取出字段修改，原话也不含具体修改指令（如"改一下"）。
+            # 此时直接执行会产出无意义的整段重写，应追问具体要改哪部分
+            if not intent.extracted_request_patch and not self._has_revision_signal(agent_request.message):
+                msg = "请告诉我具体想调整哪里，比如换住宿、改景点或调整日期。"
+                session_state = session_state_service.append_recent_message(session_state, "assistant", msg)
+                self._save_or_log(session_state, request_id=agent_request.request_id, trace_id=trace_id)
+                return AgentResponse(
+                    request_id=agent_request.request_id,
+                    session_id=session_id,
+                    status="needs_follow_up",
+                    mode="revise",
+                    follow_up_question=msg,
+                    summary=msg,
+                    trace_id=trace_id,
+                    metrics={"token_budget": budget_tracker.allocate(300)},
+                    debug={"intent": intent.model_dump(), "stage": session_state.conversation_stage},
+                )
+
             revise_input = ReviseAgentInput(
                 request=planning_request,
                 user_context=user_context_to_revise_user_context(_user_context),
@@ -232,15 +281,19 @@ class TravelOrchestrator:
                 )
             # 改稿后更新摘要：下一轮意图识别/再次改稿基于最新版本判断
             session_state.artifacts.plan_summary = build_plan_summary(revise_result.artifacts.plan.model_dump())
+            session_state.artifacts.has_plan = True
+            session_state.artifacts.plan_updated_at = datetime.now(timezone.utc)
             summary = revise_result.summary or "已按你的要求更新行程。"
             # 改稿完成，推进阶段（连续改稿仍靠 latest_plan_summary 判断，不受此影响）
             session_state.conversation_stage = "completed"
             session_state = session_state_service.append_recent_message(session_state, "assistant", summary)
-            # 原子提交：state 与改稿产物同事务，冲突整体回滚，避免"新 plan + 旧摘要"错位
-            saved = redis_session_repository.save_with_artifacts(
+            # 原子提交：state 与改稿产物同事务，冲突整体回滚；冲突时以最新会话为基底重试，
+            # 避免改稿产物静默丢失导致下次请求重复执行改稿
+            saved, session_state = self._commit_artifacts_with_retry(
                 session_state,
                 revise_result.artifacts.plan.model_dump(),
                 revise_result.artifacts.draft.model_dump(),
+                summary,
             )
             if not saved:
                 app_logger.warning(
@@ -319,6 +372,11 @@ class TravelOrchestrator:
                 stored_plan, stored_draft = redis_session_repository.load_artifacts(session_id)
                 if stored_plan:
                     session_state.artifacts.plan_summary = build_plan_summary(stored_plan)
+                    # 自愈：产物在但标记缺失（旧数据/异常场景），补齐 has_plan 让
+                    # repository.load 的产物续期与 revise 分支判定同时生效
+                    session_state.artifacts.has_plan = True
+                    if session_state.artifacts.plan_updated_at is None:
+                        session_state.artifacts.plan_updated_at = datetime.now(timezone.utc)
                 prefetched_artifacts = (stored_plan, stored_draft)
 
             # user_context 传入真实用户偏好（从 memory + 当前累计需求推断），供 LLM 意图识别参考
@@ -360,6 +418,50 @@ class TravelOrchestrator:
                 trace_id=trace_id,
                 session_id=session_state.session_id,
             )
+
+    @staticmethod
+    def _has_revision_signal(message: str) -> bool:
+        """判断原话是否包含具体的改稿指令。
+
+        策略：
+        1. 空泛纯动词短语（"改一下"/"修改"/"调整下"）→ 无具体指令，返回 False
+        2. 含具体修改动词 → 有指令，返回 True
+        3. 无动词但消息较长（描述性表达，如"我想住得离景点近一点"）→ 视为有指令
+        """
+        stripped = message.strip()
+        if _EMPTY_REVISE_PATTERN.fullmatch(stripped):
+            return False
+        if any(keyword in stripped for keyword in _REVISION_SIGNAL_KEYWORDS):
+            return True
+        return len(stripped) >= 5
+
+    def _commit_artifacts_with_retry(
+        self,
+        session_state: SessionState,
+        plan_payload: dict | None,
+        draft_payload: dict | None,
+        summary: str,
+        max_attempts: int = 3,
+    ) -> tuple[bool, SessionState]:
+        """带冲突重试的产物提交：save_with_artifacts 冲突时以最新会话为基底重放本轮变更。
+
+        返回 (是否成功, 最终 session_state)。
+        重试幂等：每次基于最新版本重放"产物标记 + stage 推进 + assistant 消息"，
+        不会重复追加消息；产物与摘要仍保持原子成对，不产生"新 plan + 旧摘要"错位。
+        """
+        current = session_state
+        for _ in range(max_attempts):
+            if redis_session_repository.save_with_artifacts(current, plan_payload, draft_payload):
+                return True, current
+            # 冲突：其他请求已推进该会话。以最新状态为基底，重放本轮产物与阶段变更后重试
+            latest = redis_session_repository.load(current.session_id)
+            if latest is None:
+                return False, current
+            current = latest.model_copy(deep=True)
+            current.artifacts = session_state.artifacts.model_copy(deep=True)
+            current.conversation_stage = "completed"
+            current = session_state_service.append_recent_message(current, "assistant", summary)
+        return False, current
 
     # qa 分支的自由对话：用 LLM 认真回答用户问题
     # 输入：用户原话 + 当前会话状态（行程摘要/近期对话）

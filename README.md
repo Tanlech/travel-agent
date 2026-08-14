@@ -1,597 +1,162 @@
 # Travel Agent
 
-这是一个已经可以真实运行的旅行规划 Agent 原型项目。
+一个可真实运行的**旅行规划多 Agent 系统**：多轮对话收集需求 → 意图识别 → 状态累积 → 调用高德/LLM 生成行程 → 审查修复 → 支持后续改稿。已接入高德天气、POI、路径规划等真实外部能力。
 
-它不再只是早期“Agent 骨架”，而是已经具备一条完整可执行的多轮闭环：
+## 一、核心能力
 
-- `PlanningAgent` 生成第一版 itinerary
-- 多个 `ReviewAgent` 从不同维度审查
-- `Supervisor` 做动作接纳/拒绝决策
-- `RepairAgent` 真实修改 itinerary
-- `Critic` 判断是否继续修复或停止
-- `GraphRunner` 驱动整条多轮回路
+- **多轮对话闭环**：`意图识别 → 状态合并 → 阶段路由 → 规划/改稿/问答` 四分支
+- **LLM 优先 + 规则兜底**：意图识别、行程审查（reflection）、修复（repair）均有可运行的 fallback，LLM 不可用时系统整体降级为规则路径，仍可跑通
+- **真实 grounding**：高德天气 forecast、POI 检索、地理编码、路径规划均已接入
+- **结构化规划管线**：景点候选收集 → 区域聚类 → 每日骨架 → 住宿适配评估 → 定向交通验证 → 行程渲染 → 校验修复
+- **改稿能力**：支持 block / day / global 三级改动范围，未受影响的天保持不动
+- **记忆**：跨会话保留用户偏好（节奏/亲子/夜游等）与历史行程
 
-并且，项目已经接入了部分真实外部能力，尤其是：
-
-- 高德天气 forecast
-- 高德 POI / geocode / 路径规划
-- 中文地名与景点名标准化
-- transport 真实路由证据留痕
-
-所以当前项目的定位更准确地说是：
-
-> 一个可运行、可多轮收敛、部分接入真实高德能力的旅行规划 Agent 系统原型。
-
----
-
-## 一、当前项目已经做到什么程度
-
-截至目前，这个项目已经不只是“状态机骨架”，而是具备了下面这些真实能力。
-
-### 1. 已经跑通完整 Agent 闭环
-
-当前默认运行链路为：
-
-```text
-PlanningAgent
--> SightseeingReviewAgent
--> WeatherReviewAgent
--> TransportReviewAgent
--> SupervisorAgent
--> RepairAgent
--> CriticAgent
--> Finalize / Continue
-```
-
-并且支持自动多轮循环：
-
-- 如果 `Critic` 认为还值得修复，会自动进入下一轮
-- 如果达到收敛条件，则自动停止并输出最终 itinerary
-- 每一轮都有 `history` 留痕
-
-你可以直接运行：
-
-```bash
-python run_demo.py
-```
-
-来看到一轮真实 demo，包括：
-
-- 当前草案
-- 审查报告
-- Supervisor 决策
-- Critic 判断
-- 质量快照
-- 动作 payload
-- 完整历史记录
-
----
-
-### 2. 已经有真实可运行的 Planning / Review / Repair / Critic
-
-当前不是空类，而是已经有真实默认实现：
-
-- `DefaultPlanningAgent`
-- `DefaultSightseeingReviewAgent`
-- `DefaultWeatherReviewAgent`
-- `DefaultTransportReviewAgent`
-- `DefaultSupervisorAgent`
-- `DefaultRepairAgent`
-- `DefaultCriticAgent`
-
-它们之间通过统一的 `PlanningWorkspace` 协作。
-
----
-
-### 3. WeatherReview 已经优先使用高德实时天气
-
-`WeatherReviewAgent` 当前优先调用：
-
-- `get_weather_forecast`
-
-并把结果归一为 reviewer 可直接决策的天气信号，例如：
-
-- `condition`
-- `temp_high`
-- `temp_low`
-- `raw_dayweather`
-- `raw_nightweather`
-- `signal_source`
-
-然后据此产出结构化 issue，例如：
-
-- `midday_heat_risk`
-- `rain_exposed_route`
-- `indoor_backup_missing`
-
-如果高德天气不可用，则会自动降级到 `weather_snapshot` fallback。
-
----
-
-### 4. TransportReview 已经优先使用高德真实路由能力
-
-`TransportReviewAgent` 当前优先使用：
-
-- `poi_id`
-- `search_pois`
-- `geocode`
-- `plan_transit`
-- `plan_driving`
-- `measure_distance`
-
-当前解析顺序大致是：
-
-```text
-poi_id -> search_pois -> geocode -> route planning -> fallback heuristic
-```
-
-transport reviewer 已经不是只看片区字符串，而是会尽量基于真实路由生成：
-
-- `cross_area_segments`
-- `total_travel_minutes`
-- `max_leg_minutes`
-- `leg:A->B|mode=...|minutes=...`
-
-并生成结构化交通问题，例如：
-
-- `heavy_cross_area_switch`
-- `inefficient_spot_order`
-
-如果 live route 命中异常，还会保留结构化调试原因，例如：
-
-- `route_duration_abnormal`
-- `route_missing`
-- `geocode_missing`
-- `lookup_failed`
-- `live_route_success`
-
----
-
-### 5. 已实现 API 结果归一、失败降级与缓存
-
-这部分是当前项目相比纯 demo 脚本更像“系统”的关键。
-
-#### 已实现
-
-- API 返回结果归一
-- reviewer 只消费可决策信号，而不是原始 JSON
-- geocode / route / weather 缓存
-- live 调用失败自动降级
-- transport 异常 route 过滤
-- 中文标准名优先检索
-
-#### 缓存内容包括
-
-- geocode cache
-- route cache
-- weather cache
-- transport review metrics history
-- quality metric history
-
-这让多轮 repair / critic 循环不会反复轰 API。
-
----
-
-### 6. 质量评分已经部分对齐 reviewer 的真实信号
-
-当前 `QualitySnapshot` 已经不是只看旧启发式统计。
-
-尤其是 `transport_efficiency`，现在会优先参考：
-
-- `transport_issue_count`
-- `transport_total_minutes`
-- `cross_area_switch_count`
-
-而不是只看：
-
-- `跨片区切换次数`
-
-此外，repair 后会重新估计 post-repair transport metrics，再更新质量快照，避免 critic 一直看修复前的旧 transport 观察。
-
----
-
-### 7. Critic / Supervisor 已经具备一定“跨轮记忆”与交通问题偏置
-
-目前策略层已经支持：
-
-- persistent transport failure 提升优先级
-- transport action 的受控 bypass
-- 对单个残留 transport blocking failure 更宽容
-- 对“overall 分数短暂波动，但 transport 结构在改善”的情况继续修一轮
-
-这使得系统不再只是机械 stop / continue，而开始具备一些真正的“多轮收敛判断”。
-
----
-
-## 二、当前 demo 能验证什么
-
-当前 `run_demo.py` 已经可以真实验证下面这些点：
-
-### 1. 是否生成初版 itinerary
-可以。
-
-### 2. 是否有多 reviewer 审查
-可以，目前至少有：
-
-- sightseeing
-- weather
-- transport
-
-### 3. weather issue 是否会基于实时 forecast 产生
-可以，前提是高德 key 可用。
-
-### 4. transport issue 是否会基于真实路由产生
-可以，前提是 POI / route 命中成功。
-
-### 5. 是否真的发生 repair
-可以，当前 `RepairAgent` 会真实修改：
-
-- spot 顺序
-- 室内替换
-- 低价值重复点清理
-- 跨区点收拢
-- 单日结构调整
-
-### 6. 是否能多轮收敛
-可以，当前 demo 已经能稳定跑到 2~4 轮范围内的自动收敛。
-
----
-
-## 三、当前项目的能力边界
-
-虽然项目已经明显超出“纯骨架阶段”，但它还不是完整产品。
-
-### 当前已经比较成熟的部分
-
-#### Agent runtime / workflow 层
-已经相当完整：
-
-- workspace
-- review / decision / repair / critic
-- graph 多轮循环
-- history 留痕
-- 结构化 issue / action / quality 模型
-
-#### Weather grounding
-已经比较稳定：
-
-- 高德天气接入
-- 实时 forecast -> reviewer signal
-- issue 产出链路较清晰
-
-#### Transport grounding
-已经进入“可用原型”阶段：
-
-- 高德 route / geocode / poi 检索已接入
-- 真实证据已进入 reviewer / history / quality
-- 多轮 transport 修复已可观察
-
-但 transport grounding 还没有达到“生产级稳定度”。
-
----
-
-### 当前仍然偏原型 / 演示的部分
-
-#### 1. Planning 仍偏轻量启发式
-初版 itinerary 还不是一个成熟的规划器，目前更偏：
-
-- demo seed 候选池
-- 片区/时段/基础分配策略
-- 基于上轮交通信号的轻量调整
-
-它还不是：
-
-- 真正的大规模 POI 搜索规划器
-- 真正的多约束最优化 itinerary planner
-
-#### 2. Repair 仍然是“结构修复型原型”
-`RepairAgent` 已经能真实改 itinerary，但它现在更偏：
-
-- 规则修复
-- 结构重排
-- 室内替换
-- 跨区压缩
-
-还不是一个更强的：
-
-- 全局 route-aware itinerary re-planner
-- 多目标重规划器
-
-#### 3. Transport 仍存在部分 fallback
-虽然 live 命中率已经提升，但某些情况下仍会退回：
-
-- fallback heuristic
-- post-repair estimate
-
-所以 transport 当前是：
-
-> 已经具备真实 grounding，但仍是“部分真实 + 部分降级”的混合态。
-
-#### 4. Lodging / budget / dining 等维度仍未真正落地
-目前主要实现的是：
-
-- sightseeing
-- weather
-- transport
-- supervisor / repair / critic
-
-而这些还没真正接入：
-
-- lodging review
-- budget optimization
-- dining / meal windows
-- opening hours / reservation constraints
-- transit schedule realism
-
----
-
-## 四、当前项目架构概览
-
-当前主要目录结构如下：
+## 二、架构总览
 
 ```text
 app/
-├── agents/
-│   ├── planning.py
-│   ├── sightseeing_review.py
-│   ├── weather_review.py
-│   ├── transport_review.py
-│   ├── supervisor.py
-│   ├── repair.py
-│   └── critic.py
-├── config/
-│   └── settings.py
-├── contracts/
-│   ├── enums.py
-│   ├── models.py
-│   ├── taxonomy.py
-│   └── workspace.py
-├── engine/
-│   └── policies.py
-├── graph/
-│   └── runner.py
+├── agents/                     # Agent 层
+│   ├── orchestrator.py         # 对话编排入口：按阶段路由到 clarify/planning/revise/qa
+│   ├── planning.py             # 规划 Agent：完整规划管线（聚类→骨架→渲染→修复）
+│   ├── revise.py               # 改稿 Agent：block/day/global 三策略
+│   ├── reflection.py           # 行程审查（LLM + 规则）
+│   ├── repair.py               # 行程修复（LLM + 规则重建）
+│   ├── prompt/                 # 各 Agent 的 system prompt
+│   ├── schema/                 # 各 Agent 的输入输出契约
+│   └── sparse/                 # 各 Agent 的 user prompt 拼装
+├── budgets/                    # token 预算跟踪
+├── domain/
+│   ├── intent/                 # 意图层：只做"理解"（LLM 优先 + fallback 规则）
+│   ├── session/                # 会话层：只做"累积"（patch 合并 + 阶段状态机 + Redis 持久化）
+│   ├── memory/                 # 用户偏好 / 行程记忆
+│   └── context/                # PlanningContext 等上下文模型
 ├── infrastructure/
-│   └── amap/
-│       ├── __init__.py
-│       └── client.py
-└── normalization.py
+│   ├── llm/                    # OpenAI 兼容 LLM 客户端（结构化 JSON 生成 + 重试）
+│   ├── amap/                   # 高德地图客户端（POI/geocode/route/weather）
+│   ├── config/                 # pydantic-settings 配置
+│   └── redis_client.py
+├── observability/              # 结构化日志 + 指标
+├── tools/                      # 工具层：attraction / weather / lodging / transport
+└── server.py                   # FastAPI 入口：/chat /session /health + 静态前端
 
-run_demo.py
+main.py                         # uvicorn 启动
+static/index.html               # 前端单页应用
+test/                           # 测试
 ```
 
----
+### 分层职责
 
-## 五、几个关键模块说明
+| 层 | 职责 | 关键约束 |
+|---|---|---|
+| 意图层 | 判定意图 + 提取**本轮新增字段**（patch） | patch-only，不碰会话状态 |
+| 会话层 | 白名单合并 patch + 状态机推进阶段 + 乐观并发持久化 | 字段单一来源，杜绝覆盖已确认需求 |
+| Agent 层 | 规划 / 改稿 / 审查 / 修复 | 输入输出均有 pydantic 契约校验 |
+| 工具层 | 对接高德与 LLM，产出结构化证据 | 失败静默降级，不阻断主链路 |
 
-### `app/contracts/`
-系统统一契约层，定义：
+## 三、一次对话的完整链路
 
-- request
-- shared_map
-- draft itinerary
-- issue / action
-- specialist report
-- quality snapshot
-- critic report
-- supervisor decision
-- workspace
+```text
+POST /chat
+  └─ TravelOrchestrator.handle
+      ├─ 1. 加载会话（Redis 乐观锁）+ 填充行程摘要 + 构建用户偏好
+      ├─ 2. IntentSessionPipeline.run（意图识别 + patch 合并 + 状态机）
+      ├─ 3. stage → 执行模式
+      │     ├─ clarify   缺字段 → 追问补全
+      │     ├─ planning  → planning_agent.run_pipeline
+      │     ├─ revise    → revise_agent.run
+      │     └─ qa        → LLM 自由对话（携带行程摘要）
+      └─ 4. 乐观保存会话（冲突自动重试）
+```
 
-这是整个系统的“统一语言层”。
+### 规划管线（planning_agent）
 
----
+```text
+字段校验 → 工具收集(attraction/weather/lodging)
+→ LLM 区域聚类(cluster plan) → 必要时补充景点
+→ LLM 每日骨架(skeleton，校验选点∈候选池)
+→ 住宿适配评估/刷新 → 定向交通验证
+→ LLM 行程渲染(draft) → 轻量校验修复(时间块/必去覆盖/结束过早)
+→ 组装 TripPlan → 持久化用户/行程记忆
+```
 
-### `app/graph/runner.py`
-当前真正把多 Agent 回路串起来的运行器。
+### 改稿管线（revise_agent）
 
-它负责：
+```text
+改稿意图归一 → 影响范围分析(impact)
+→ 按需刷新工具证据(weather/attraction/lodging/transport)
+→ 按 scope 走 block/day/global 策略（未受影响的天原样保留）
+→ 行程审查(reflection) → 需要时修复(repair) → 更新产物
+```
 
-- 初始化 workspace
-- 执行 planning
-- 执行多 reviewer
-- 执行 supervisor 决策
-- 执行 repair
-- 执行 critic
-- 自动多轮 continue / stop
+## 四、运行方式
 
----
-
-### `app/agents/planning.py`
-当前第一版 itinerary 生成器。
-
-特点：
-
-- 使用共享候选池
-- 做标准化
-- 支持轻量片区分配
-- 开始参考上一轮 transport 信号
-
----
-
-### `app/agents/weather_review.py`
-当前天气审查器。
-
-特点：
-
-- 优先使用高德 forecast
-- 天气条件标准化
-- 支持 fallback snapshot
-- 产出结构化 weather issues
-
----
-
-### `app/agents/transport_review.py`
-当前交通审查器。
-
-特点：
-
-- POI / geocode / route 多级命中
-- live route + fallback heuristic
-- evidence 标准化
-- debug reason 留痕
-- round metrics 存档
-
----
-
-### `app/agents/repair.py`
-当前 repair 执行器。
-
-特点：
-
-- 真正修改 itinerary
-- 根据 action 类型执行不同修复
-- 使用 transport metrics 辅助跨区收拢
-- repair 后重估 transport metrics
-- 更新质量快照与历史指标
-
----
-
-### `app/engine/policies.py`
-当前系统决策策略中心。
-
-包括：
-
-- supervisor policy
-- repair policy
-- critic policy
-- 决策排序与拒绝原因
-- persistent failure 偏置
-- transport 容错与继续修复判断
-
----
-
-### `app/infrastructure/amap/client.py`
-当前高德基础设施封装。
-
-已支持：
-
-- geocode
-- search_pois
-- get_poi_by_id
-- measure_distance
-- plan_transit
-- plan_driving
-- get_weather_forecast
-
----
-
-## 六、当前真实 demo 状态总结
-
-基于目前已经跑通的 demo，可以把项目成熟度概括成下面三层：
-
-### 第 1 层：已经稳定可运行
-
-- graph runner 多轮执行
-- review / supervisor / repair / critic 闭环
-- 中文标准化
-- demo 输出完整可读
-
-### 第 2 层：已经接入真实外部能力
-
-- 高德天气 forecast
-- 高德 transport route / poi / geocode
-- transport / weather evidence 真实化
-
-### 第 3 层：仍处于原型打磨阶段
-
-- planning 仍偏轻量
-- transport grounding 仍有局部 fallback
-- repair 仍偏规则型
-- critic / supervisor 策略仍在调优
-
-所以当前最准确的判断是：
-
-> 这个项目已经从“系统骨架”进化到了“可运行的多 Agent 原型系统”，并且已经具备部分真实世界 grounding，但还没有进入成熟产品阶段。
-
----
-
-## 七、如何运行
-
-### 1. Python 版本
-建议：
+### 环境要求
 
 - Python 3.11+
+- Redis（本地或 Docker）
+- 高德 Key（可选，缺省时天气/交通降级）
+- LLM Key（可选，缺省时走规则 fallback）
 
-### 2. 环境变量
-项目根目录下准备 `.env`：
-
-```env
-APP_NAME=travel-agent
-APP_ENV=dev
-DEBUG=false
-
-AMAP_KEY=你的高德 Key
-AMAP_API_KEY=
-AMAP_BASE_URL=https://restapi.amap.com
-AMAP_TIMEOUT_SECONDS=10.0
-```
-
-说明：
-
-- `AMAP_KEY` 为主要使用项
-- 如果未配置，weather / transport 会更多退回 fallback
-
-### 3. 运行 demo
+### 1. 本地启动
 
 ```bash
-python run_demo.py
+# 准备环境变量
+cp .env.example .env   # 填入 AMAP_KEY / OPENAI_API_KEY 等
+
+# 安装依赖
+pip install -e .
+
+# 启动服务（需本地 Redis）
+python main.py
 ```
 
-或在你的本地环境中直接使用解释器路径运行。
+访问 `http://localhost:8000` 打开对话界面，`http://localhost:8000/docs` 查看接口。
 
----
+### 2. Docker 启动
 
-## 八、当前最值得继续推进的方向
+```bash
+docker compose up --build
+```
 
-如果继续往下做，当前最值得投入的方向不是再补骨架，而是继续提升“真实规划能力”。
+自带 Redis 服务，无需本地安装。
 
-### 优先级 1：增强 transport grounding 稳定度
+### 3. 运行测试
 
-包括：
+```bash
+pip install -e ".[dev]"
+pytest
+```
 
-- 更稳定的 POI 命中策略
-- 更细的 route 调试与异常分类
-- repair 后更真实的 route 重估
-- 更少 fallback，更多 live route
+测试通过 monkeypatch 禁用 LLM，固定走意图识别 fallback 路径，不依赖外部 Key。
 
-### 优先级 2：增强 planning 的真实规划能力
+## 五、环境变量
 
-包括：
+| 变量 | 说明 | 默认 |
+|---|---|---|
+| `AMAP_KEY` | 高德 Web 服务 Key | 空（天气/交通降级） |
+| `REDIS_URL` | Redis 连接串 | 空（需配置） |
+| `LLM_PROVIDER` | `qwen` / `openai` / `mock` | `mock` |
+| `OPENAI_API_KEY` | OpenAI 兼容 Key | 空 |
+| `OPENAI_BASE_URL` | 兼容端点，如通义 `https://dashscope.aliyuncs.com/compatible-mode/v1` | 空 |
+| `OPENAI_MODEL` | 模型名 | `qwen-plus` |
+| `ENABLE_MOCK_LLM` | 为 `true` 时强制走规则路径，不调 LLM | `true` |
+| `REDIS_TTL_SECONDS` | 会话 TTL | 86400 |
 
-- 更强的候选 POI 获取
-- 基于 route/weather 的初版 itinerary 生成
-- 不是仅靠 demo seed 的轻量分配
+## 六、核心设计
 
-### 优先级 3：让 repair 更像局部重规划器
+- **patch-only 单向累计**：意图层只输出本轮新增字段，会话层白名单合并，避免用户已确认的信息被覆盖
+- **乐观并发**：Redis `WATCH + version` 保证同一会话并发请求不互相覆盖；`save_with_artifacts` 将会话状态与行程产物原子提交，杜绝"新行程 + 旧摘要"错位
+- **字段单一来源**：必填字段、patch 白名单从 schema 派生，多处引用同一常量，避免口径漂移
+- **LLM 输出消毒**：结构化输出经 pydantic validator 白名单过滤、类型归一、非法值丢弃并留痕
+- **日期归一**：统一 `YYYY-MM-DD`，支持跨年进位、区间方向修正、日期与天数一致性推导
 
-包括：
+## 七、当前边界与后续方向
 
-- 更细的 spot replacement
-- 更真实的 route-aware reorder
-- 更少重复注入同类室内点
-- 更好地平衡 weather 与 transport 的 tradeoff
+**已成熟**：多轮对话闭环、意图/会话分层、规划/改稿管线、高德 grounding、降级策略。
 
-### 优先级 4：补齐更多 reviewer 维度
+**仍偏原型**：
+- 规则修复（repair）较机械，与 LLM 渲染风格存在差异
+- 改稿的交通证据只覆盖前几对关键转场
+- 缺少 lodging / budget / dining 等更多审查维度
 
-包括：
-
-- lodging
-- budget
-- meal / dining
-- opening hours
-- reservation feasibility
-
----
-
-## 九、项目现状一句话结论
-
-当前 `travel-agent` 项目已经不是“只有骨架的 Agent 系统”，而是一个：
-
-> 已经可以真实运行、多轮收敛、具备结构化 review / supervisor / repair / critic 闭环，并且已经接入高德天气与部分真实交通能力的旅行规划 Agent 原型系统。
-
-它已经能用来验证：
-
-- 多 Agent 闭环是否有效
-- weather / transport grounding 是否能影响 itinerary
-- supervisor / critic / repair 是否能在多轮中形成可观察的收敛
-
-但它仍然是原型，而不是成熟产品。
+**建议方向**：补全审查维度、增强规则修复与 LLM 渲染的一致性、扩充测试覆盖（会话合并 / 并发 / 编排分支）。

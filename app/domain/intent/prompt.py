@@ -32,7 +32,7 @@ INTENT_RECOGNITION_SYSTEM_PROMPT = """
 
 四、意图判断
 根据语义判断属于：new_plan / revise_plan / clarification / qa / confirm / reject / end_session / unknown。
-- 已有行程（latest_plan_summary 非空即代表已有行程；或 session_context 显示已规划过）且在对行程提修改 → revise_plan，并给 revision_scope_hint（block_level/day_level/global）。
+- 已有行程（has_plan=True 或 latest_plan_summary 非空即代表已有行程；或 session_context 显示已规划过）且在对行程提修改 → revise_plan，并给 revision_scope_hint（block_level/day_level/global）。
 - 用户补充字段 → 放进 extracted_request_patch；关键字段仍缺（destination/start_date/end_date）→ missing_fields 列出。
 - 纯确认/告别/闲聊/拒绝（"算了"、"不用了"、"不规划了"）→ confirm / end_session / qa / reject，不提取 patch。
 - 无法判断 → unknown，不要硬猜。
@@ -44,8 +44,7 @@ INTENT_RECOGNITION_SYSTEM_PROMPT = """
 """.strip()
 
 
-# 把会话层输入整理成给 LLM 看的 JSON 文本
-# 目的是让模型看到“当前原话 + 当前已知信息 + 上下文状态”
+# 把会话层输入整理成给 LLM 看的 JSON 文本（原话 + 当前需求 + 上下文状态）
 def build_intent_recognition_prompt(intent_input: IntentRecognitionInput) -> str:
     payload = {
         "current_date": date.today().isoformat(),
@@ -54,6 +53,7 @@ def build_intent_recognition_prompt(intent_input: IntentRecognitionInput) -> str
         "session_context": intent_input.session_context,
         "user_context": intent_input.user_context,
         "latest_plan_summary": intent_input.latest_plan_summary,
+        "has_plan": intent_input.has_plan,
         "recent_messages": [m.model_dump() for m in intent_input.recent_messages],
         "pending_questions": intent_input.pending_questions,
     }

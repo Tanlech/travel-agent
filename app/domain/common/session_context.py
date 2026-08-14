@@ -2,7 +2,7 @@
 
 from pydantic import BaseModel
 
-from app.domain.stage import ConversationStage
+from app.domain.common.stage import ConversationStage
 
 
 class SessionContextView(BaseModel):

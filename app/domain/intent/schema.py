@@ -1,19 +1,17 @@
 from __future__ import annotations
 
-import re
-from datetime import date, datetime
 from typing import Any, get_args, get_origin
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.domain.intent_type import IntentType, RevisionScope
-from app.domain.session_context import SessionContextView
+from app.domain.common.chat import ChatMessage
+from app.domain.common.dates import normalize_date
+from app.domain.common.intent_type import IntentType, RevisionScope
+from app.domain.common.session_context import SessionContextView
 
 
 class IntentPlanningRequest(BaseModel):
-    """intent 层的旅行需求视图，与 session 层 SessionRequestState 由 adapter 互转
-    extra="forbid"：字段漂移立即报错，防止两套结构悄悄分叉
-    """
+    """intent 层旅行需求视图，与 session 层 SessionRequestState 由 adapter 互转（extra="forbid" 防字段漂移）"""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -31,15 +29,14 @@ class IntentPlanningRequest(BaseModel):
     @field_validator("days", "travelers")
     @classmethod
     def _check_positive_int(cls, v: int | None) -> int | None:
-        # days/travelers 必须为正整数（0/负值会污染下游 merge 与天数推导）
-        # None 表示"未提供"，放行；缺失字段由 merge 层按需追问
+        # 0/负值会污染下游 merge 与天数推导；None 表示未提供，放行
         if v is not None and v <= 0:
             raise ValueError("days/travelers must be positive integers")
         return v
 
     @model_validator(mode="after")
     def _normalize_dates(self) -> "IntentPlanningRequest":
-        # 日期统一归一为 YYYY-MM-DD
+        # 日期统一归一为 YYYY-MM-DD；end 早于 start 时对调
         for field in ("start_date", "end_date"):
             value = getattr(self, field)
             if not value:
@@ -48,17 +45,9 @@ class IntentPlanningRequest(BaseModel):
             if normalized is None:
                 raise ValueError(f"invalid {field} {value!r}, expected YYYY-MM-DD")
             setattr(self, field, normalized)
-        # 区间方向修正：end 早于 start（LLM 反向输出或历史脏数据）时对调
         if self.start_date and self.end_date and self.end_date < self.start_date:
             self.start_date, self.end_date = self.end_date, self.start_date
         return self
-
-
-class ChatMessage(BaseModel):
-    """近期对话消息"""
-
-    role: str
-    content: str
 
 
 class IntentRecognitionInput(BaseModel):
@@ -70,16 +59,17 @@ class IntentRecognitionInput(BaseModel):
 
     raw_message: str = Field(min_length=1)  # 用户原话，空白直接拒绝
     planning_request: IntentPlanningRequest | None = None  # 当前结构化需求（上下文）
-    session_context: SessionContextView = Field(default_factory=SessionContextView)  # 会话状态（阶段/改稿次数）
+    session_context: SessionContextView = Field(default_factory=SessionContextView)  # 会话状态
     user_context: dict[str, Any] = Field(default_factory=dict)  # 用户长期偏好
     latest_plan_summary: dict[str, Any] | None = None  # 已有行程摘要（revise 判定依据）
+    has_plan: bool = False  # 会话层产物落库标记（更可靠的"已有行程"判据）
     recent_messages: list[ChatMessage] = Field(default_factory=list)
     pending_questions: list[str] = Field(default_factory=list)
 
     @field_validator("raw_message")
     @classmethod
     def _strip_blank_message(cls, v: str) -> str:
-        # 去首尾空白 + 拒绝"纯空白消息"
+        # 去首尾空白并拒绝纯空白消息
         stripped = v.strip()
         if not stripped:
             raise ValueError("raw_message must not be blank")
@@ -87,10 +77,7 @@ class IntentRecognitionInput(BaseModel):
 
 
 class IntentRecognitionOutput(BaseModel):
-    """意图识别输出
-    patch-only：只返回本轮"新增/修改"的字段，累计合并由 session 层负责
-    LLM 输出不可靠，schema 统一消毒
-    """
+    """意图识别输出。patch-only：只返回本轮新增/修改字段，累计合并由 session 层负责。"""
 
     intent_type: IntentType = IntentType.UNKNOWN
     extracted_request_patch: dict[str, Any] = Field(default_factory=dict)  # 本轮新增/修改的字段
@@ -102,7 +89,7 @@ class IntentRecognitionOutput(BaseModel):
     @field_validator("missing_fields")
     @classmethod
     def _sanitize_missing(cls, v: list[str]) -> list[str]:
-        # 防止 LLM 把非必填字段写进追问列表；白名单过滤 + 保序去重
+        # 只允许必填字段进入追问列表；白名单过滤 + 保序去重
         seen: list[str] = []
         for f in v:
             if f in REQUIRED_PATCH_FIELDS and f not in seen:
@@ -112,8 +99,7 @@ class IntentRecognitionOutput(BaseModel):
     @field_validator("revision_scope_hint", mode="before")
     @classmethod
     def _sanitize_scope(cls, v: str | None) -> str | None:
-        # 枚举外值归一为 None，避免单个字段值错让整条识别作废（由 revise 分支兜底 day_level）
-        # 合法值与 RevisionScope 单一来源，避免双份定义漂移
+        # 枚举外值归一为 None（revise 分支兜底 day_level）；合法值来源与 RevisionScope 单一
         if v in get_args(RevisionScope):
             return v
         return None
@@ -140,8 +126,7 @@ class IntentRecognitionOutput(BaseModel):
                 f"{self.reasoning or ''}（归一：clarification 无缺失字段，降级为 new_plan）"
             ).strip()
 
-        # 4. 一致性：scope 只属于 revise；非 revise 意图（new_plan/clarification/qa/confirm/reject/
-        #    end_session/unknown）一律清空，避免 LLM 误带标记污染下游判定
+        # 4. 一致性：scope 只属于 revise；纯对话/收尾类意图清空 patch 与缺失字段
         if self.intent_type != IntentType.REVISE_PLAN:
             self.revision_scope_hint = None
         if self.intent_type in (
@@ -151,55 +136,18 @@ class IntentRecognitionOutput(BaseModel):
             IntentType.END_SESSION,
             IntentType.UNKNOWN,
         ):
-            # 纯对话/收尾类意图不承载需求字段，patch 与缺失字段一并清空，
-            # 避免输出"问答意图 + 缺字段"的矛盾契约
             self.extracted_request_patch = {}
             self.missing_fields = []
         return self
 
 
 # ============================================================
-# 辅助逻辑：日期归一化 / patch 清洗（供上述模型校验使用）
+# 辅助逻辑：patch 清洗（供上述模型校验使用）
 # ============================================================
 
 
-# 无年份日期"明显过期"的容忍阈值（天）：早于今天超过该天数视为"上一年"，进位次年
-_PAST_DATE_TOLERANCE_DAYS = 60
-
-
-def normalize_date(value: str) -> str | None:
-    """日期归一为 YYYY-MM-DD
-    校验真实日期（如 2026-02-30 返回 None），杜绝非法日期污染下游
-    无年份的月/日默认当年；明显过期（早于今天 _PAST_DATE_TOLERANCE_DAYS 天以上，如跨年）按次年
-    """
-    text = str(value).strip()
-    if not text:
-        return None
-    m = re.fullmatch(r"(\d{4})[/.\-](\d{1,2})[/.\-](\d{1,2})", text)
-    if m:
-        return _norm_ymd(int(m.group(1)), int(m.group(2)), int(m.group(3)))
-    m = re.fullmatch(r"(\d{1,2})月(\d{1,2})(?:号|日)", text)
-    if m:
-        month, day = int(m.group(1)), int(m.group(2))
-        year = datetime.now().year
-        candidate = _norm_ymd(year, month, day)
-        if candidate is None:
-            return None
-        if (date.fromisoformat(candidate) - date.today()).days < -_PAST_DATE_TOLERANCE_DAYS:
-            candidate = _norm_ymd(year + 1, month, day)
-        return candidate
-    return None
-
-
-def _norm_ymd(year: int, month: int, day: int) -> str | None:
-    try:
-        return datetime(year, month, day).strftime("%Y-%m-%d")
-    except ValueError:
-        return None
-
-
 def _annotation_is_int(annotation: Any) -> bool:
-    """判断字段注解是否为 int（兼容 int | None 这种可选写法）。"""
+    """判断字段注解是否为 int（兼容 int | None 可选写法）"""
     if annotation is int:
         return True
     if get_origin(annotation) is not None:
@@ -217,14 +165,12 @@ _INT_PATCH_FIELDS = {
 }
 # 必须为正整数的字段（0/负值会产生异常下游状态）
 _POSITIVE_INT_FIELDS = {"days", "travelers"}
-# 必填关键字段（有序：缺字段时的追问顺序 = 定义顺序）；session 层直接引用本常量
+# 必填关键字段（有序：追问顺序 = 定义顺序）；session 层直接引用
 REQUIRED_PATCH_FIELDS = ("destination", "start_date", "end_date")
 
 
 def _clean_patch(patch: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
-    """patch 归一化：白名单过滤 + 按字段类型归一
-    返回 (cleaned, dropped)：cleaned 可安全合并进 session；dropped 是被丢弃的字段名，用于诊断留痕
-    """
+    """patch 归一化：白名单过滤 + 按字段类型归一；返回 (cleaned, dropped)"""
     cleaned: dict[str, Any] = {}
     dropped: list[str] = []
     for field, value in patch.items():
@@ -237,7 +183,7 @@ def _clean_patch(patch: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         else:
             cleaned[field] = normalized
 
-    # 成对日期为权威：方向修正 + 清 days（天数由区间派生；"单端日期+days"的补全交给 session merge）
+    # 成对日期为权威：方向修正 + 清 days（天数由区间派生；单端日期+days 的补全交给 session merge）
     if "start_date" in cleaned and "end_date" in cleaned:
         if cleaned["start_date"] > cleaned["end_date"]:
             cleaned["start_date"], cleaned["end_date"] = cleaned["end_date"], cleaned["start_date"]

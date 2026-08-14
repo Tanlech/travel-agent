@@ -113,8 +113,6 @@ class PlanningAgent:
         state.plan = self._compose_plan(state, skeleton, lodging_anchor)
         state.status = "completed"
 
-        if response_context.response_mode == "revise_plan":
-            state.plan.summary = f"[改稿模式] {state.plan.summary}"
         if not response_context.include_alternatives:
             state.plan.alternatives = []
         if not response_context.include_weather_notes:
@@ -135,7 +133,7 @@ class PlanningAgent:
             [item.name for item in (state.attraction_result.candidates if state.attraction_result else [])],
             list(request.avoid_spots or []),
             state.plan.summary if state.plan else draft.summary,
-            feedback=response_context.response_mode,
+            response_mode=response_context.response_mode,
         )
 
         final_state = {

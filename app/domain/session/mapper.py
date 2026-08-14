@@ -17,7 +17,7 @@ _FIELD_LABELS = {
 
 
 def _compute_days(start_date: str | None, end_date: str | None) -> int:
-    """从 start_date/end_date 推算天数；解析失败回退 1 天。"""
+    """从 start/end_date 推算天数，解析失败回退 1 天"""
     if not start_date or not end_date:
         return 1
     try:
@@ -29,12 +29,7 @@ def _compute_days(start_date: str | None, end_date: str | None) -> int:
 
 
 def session_state_to_planning_request(state: SessionState) -> PlanningRequest:
-    """把 SessionState 的累计需求映射成 planning_agent 可消费的 PlanningRequest。
-
-    - days 优先取显式值，否则从 start/end_date 推算
-    - travelers 在 SessionRequestState 是 int，PlanningRequest 是 list[str]，做转换
-    - budget 不在对话层强制（与 intent prompt 对齐），传 None
-    """
+    """SessionState 累计需求 → PlanningRequest（days 缺省从日期推算；travelers 转 list；budget 恒 None）"""
     req = state.current_request_state
     days = req.days if req.days else _compute_days(req.start_date, req.end_date)
     travelers: list[str] = [f"{req.travelers} adults"] if req.travelers else []
@@ -54,10 +49,7 @@ def session_state_to_planning_request(state: SessionState) -> PlanningRequest:
 
 
 def session_state_to_session_context(state: SessionState) -> SessionContext:
-    """把 SessionState 投影成系统 A 的 SessionContext，供 PlanningContext.session 使用。
-
-    planning_agent 内部仍读 state.session（SessionContext），这里做桥接，planning_agent 不动。
-    """
+    """SessionState → SessionContext（planning_agent 内部仍读 SessionContext，这里做桥接）"""
     req = state.current_request_state
     confirmed: list[str] = []
     if req.destination:
@@ -77,7 +69,7 @@ def session_state_to_session_context(state: SessionState) -> SessionContext:
 
 
 def session_context_to_revise_session_context(ctx: SessionContext) -> ReviseSessionContext:
-    """显式映射 SessionContext → ReviseSessionContext，避免 schema 演进时 ** 展开静默出错。"""
+    """显式映射 SessionContext → ReviseSessionContext（防 ** 展开静默出错）"""
     return ReviseSessionContext(
         session_id=ctx.session_id,
         confirmed_fields=list(ctx.confirmed_fields),
@@ -89,11 +81,7 @@ def session_context_to_revise_session_context(ctx: SessionContext) -> ReviseSess
 
 
 def user_context_to_revise_user_context(user_context: dict) -> ReviseUserContext:
-    """UserContext(dict) → ReviseUserContext，含 pace 值映射。
-
-    UserContext.pace_preference 用 relaxed/dense，
-    ReviseUserContext.pace_preference 用 slow/balanced/fast，需做转换。
-    """
+    """UserContext(dict) → ReviseUserContext（pace: relaxed/dense → slow/fast）"""
     pace_map = {"relaxed": "slow", "dense": "fast"}
     raw_pace = user_context.get("pace_preference")
     revise_pace = pace_map.get(raw_pace) if raw_pace else None
@@ -116,7 +104,7 @@ def build_follow_up_question(pending_questions: list[str]) -> str:
 
 
 def stage_to_execution_mode(stage: str) -> str:
-    """把 SessionState 的 conversation_stage 映射成 ExecutionPlan.mode。"""
+    """conversation_stage → ExecutionPlan.mode"""
     if stage in {"collecting_destination", "collecting_dates", "collecting_requirements"}:
         return "clarify"
     if stage == "ready_to_plan":
@@ -129,11 +117,7 @@ def stage_to_execution_mode(stage: str) -> str:
 
 
 def build_plan_summary(plan: dict) -> dict:
-    """从 TripPlan payload 生成轻量摘要，供意图识别判断"是否已有行程"。
-
-    只保留判断 new_plan vs revise_plan 所需的最少信息（目的地、天数、路线意图、
-    每日区域、住宿），避免把完整行程灌给 LLM。plan 可以是 dict 或 TripPlan.model_dump()。
-    """
+    """从 TripPlan 生成轻量摘要（只保留判断 new_plan vs revise_plan 的最少信息，避免灌给 LLM）"""
     daily_plan = plan.get("daily_plan") or []
     return {
         "destination": plan.get("destination"),

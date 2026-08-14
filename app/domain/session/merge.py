@@ -1,53 +1,24 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
-from typing import Any
+from typing import Any, get_origin
 
 from app.domain.intent.schema import REQUIRED_PATCH_FIELDS
 from app.domain.session.schema import SessionMergeResult, SessionRequestState
 
 
-ALLOWED_PATCH_FIELDS = {
-    "destination",
-    "start_date",
-    "end_date",
-    "days",
-    "departure_city",
-    "travelers",
-    "preferences",
-    "must_visit_spots",
-    "optional_spots",
-    "avoid_spots",
-}
+# 白名单/类型集合从 SessionRequestState 派生（字段单一来源，新增字段无需维护第二份）
+ALLOWED_PATCH_FIELDS = set(SessionRequestState.model_fields)
 
 LIST_FIELDS = {
-    "preferences",
-    "must_visit_spots",
-    "optional_spots",
-    "avoid_spots",
+    name for name, field in SessionRequestState.model_fields.items() if get_origin(field.annotation) is list
 }
 
-SCALAR_FIELDS = {
-    "destination",
-    "start_date",
-    "end_date",
-    "days",
-    "departure_city",
-    "travelers",
-}
-
-# 必填关键字段（有序：缺字段时的追问顺序 = 定义顺序）
-# 与 intent 层 REQUIRED_PATCH_FIELDS 单一来源，避免两处维护漂移
+# 必填关键字段（有序 = 追问顺序；与 intent 层单一来源）
 REQUIRED_FIELDS = REQUIRED_PATCH_FIELDS
 
 
-# 统一维护 patch -> full state 的合并规则
-# 规则：
-# 1. patch 没出现的字段不改
-# 2. None 和空字符串不覆盖旧值
-# 3. 标量字段直接覆盖
-# 4. 列表字段第一版按整体替换处理
-# 5. 只允许白名单字段参与 merge
+# 合并规则：白名单才参与；None/空串不覆盖；标量覆盖、列表整体替换
 
 def merge_request_state(
     current_state: SessionRequestState | None,
@@ -55,6 +26,7 @@ def merge_request_state(
 ) -> SessionMergeResult:
     # 以旧状态为基底（无旧状态时用空状态），在副本上累加
     next_dump = dict((current_state or SessionRequestState()).model_dump())
+    changed_fields: list[str] = []
 
     # 逐字段合并 patch —— 这是 patch-only 累计的核心
     for field, value in request_patch.items():
@@ -68,48 +40,67 @@ def merge_request_state(
         if isinstance(value, str) and not value.strip():
             continue
 
-        # 规则4：列表字段强制转 list；标量字段原样用
-        # ⚠️ 可优化点：列表字段当前是"整体替换"语义，不是追加
-        #    如用户先说"喜欢人文"再说"也喜欢自然"，会覆盖成只剩"自然"
-        #    后续若要支持追加，需在此区分"替换 vs 追加"策略
-        normalized_value = list(value) if field in LIST_FIELDS else value
+        # 列表字段强制转 list（防字符串拆字）；标量原样
+        # ⚠️ 列表当前是整体替换语义（追加需另做策略）
+        if field in LIST_FIELDS:
+            normalized_value = value if isinstance(value, list) else [value]
+        else:
+            normalized_value = value
         if next_dump.get(field) != normalized_value:
             next_dump[field] = normalized_value
+            changed_fields.append(field)
 
     # 用合并后的 dict 重建强类型对象（会做字段校验）
     next_state = SessionRequestState(**next_dump)
-    # 日期区间与天数的一致性归一化（如"8月10号玩3天"补全 end_date）
-    next_state = _normalize_date_range(next_state)
+    # 日期区间与天数归一化（如"8月10号玩3天"补全 end_date）
+    before_dates = (next_state.start_date, next_state.end_date, next_state.days)
+    next_state = _normalize_date_range(next_state, request_patch)
+    # 归一化推导出的日期变化也记入 changed_fields（如 days → 补全 end_date）
+    for field, before, after in zip(
+        ("start_date", "end_date", "days"),
+        before_dates,
+        (next_state.start_date, next_state.end_date, next_state.days),
+    ):
+        if before != after and field not in changed_fields:
+            changed_fields.append(field)
     # 重新计算还缺哪些必填字段（destination/start_date/end_date）
     remaining_missing_fields = compute_missing_fields(next_state)
 
     return SessionMergeResult(
         next_state=next_state,
         remaining_missing_fields=remaining_missing_fields,
+        changed_fields=changed_fields,
     )
 
 
-def _normalize_date_range(state: SessionRequestState) -> SessionRequestState:
+def _normalize_date_range(state: SessionRequestState, request_patch: dict[str, Any] | None = None) -> SessionRequestState:
     """日期区间与天数的一致性归一化（幂等）。
-
-    - start/end 齐全：冗余 days 一律清除（区间成为权威，杜绝"区间 3 天但 days=5"矛盾）；
-      若 end 早于 start（改期时旧日期残留导致反向），对调修正
-    - start + days → 补全 end = start + days - 1，并清除 days
-    - end + days   → 补全 start = end - days + 1，并清除 days
-    - 无 days 或无任何一端日期时不动（无法定位，交给追问）
+    - start/end 反向时对调（不依赖 days，改期残留也能自愈）
+    - patch 显式给 days 时以 days 为准重算区间（用户"改天数"不被区间权威吞掉）
+    - 区间完整且非显式 days：区间权威，清 days，杜绝"区间 3 天但 days=5"矛盾
+    - start/end 单端 + days：补全另一端并清 days
+    - 无 days 或无任何一端日期时不动
     """
-    # 方向防御不依赖 days：改期场景可能"新 start + 旧 end"残留出反向区间，
-    # 不能等 days 分支才处理（无 days 时原本会直接返回）
-    if state.start_date and state.end_date:
-        if state.end_date < state.start_date:
-            state = state.model_copy(update={"start_date": state.end_date, "end_date": state.start_date})
-        if state.days is not None:
-            return state.model_copy(update={"days": None})
+    patch = request_patch or {}
+    patch_days = "days" in patch and patch.get("days") is not None
+    # 方向修正（不依赖 days，改期残留的反向区间也能自愈）
+    if state.start_date and state.end_date and state.end_date < state.start_date:
+        state = state.model_copy(update={"start_date": state.end_date, "end_date": state.start_date})
+    if state.days is None or state.days <= 0:
         return state
-    if not state.days or int(state.days) <= 0:
-        return state
-    days = int(state.days)
+    days = state.days
     try:
+        # 显式天数 + 区间完整：以最新给的日期为锚重算（patch 给了 end 用 end 锚，否则 start 锚）
+        if patch_days and state.start_date and state.end_date:
+            if "start_date" not in patch and "end_date" in patch:
+                end = date.fromisoformat(state.end_date)
+                start = end - timedelta(days=days - 1)
+            else:
+                start = date.fromisoformat(state.start_date)
+                end = start + timedelta(days=days - 1)
+            return state.model_copy(
+                update={"start_date": start.isoformat(), "end_date": end.isoformat(), "days": None}
+            )
         if state.start_date and not state.end_date:
             start = date.fromisoformat(state.start_date)
             end = start + timedelta(days=days - 1)
@@ -119,13 +110,15 @@ def _normalize_date_range(state: SessionRequestState) -> SessionRequestState:
             start = end - timedelta(days=days - 1)
             return state.model_copy(update={"start_date": start.isoformat(), "days": None})
     except ValueError:
-        # 历史数据里可能有非 ISO 日期（旧版本），保持原样，由下游防御
+        # 历史数据可能含非 ISO 日期，保持原样由下游防御
         return state
+    # 区间完整且非显式 days：区间权威，清冗余 days
+    if state.start_date and state.end_date:
+        return state.model_copy(update={"days": None})
     return state
 
 
-# 当前完整状态还缺哪些关键字段，由 session 层统一判断
-# 字段集合与顺序来自 REQUIRED_FIELDS（意图识别层也复用同一常量，保证口径一致）
+# 当前状态还缺哪些必填字段（集合与顺序来自 REQUIRED_FIELDS，与意图层口径一致）
 
 def compute_missing_fields(request_state: SessionRequestState) -> list[str]:
     missing: list[str] = []

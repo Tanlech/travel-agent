@@ -32,6 +32,7 @@ def adapt_session_view_to_intent_input(
         session_context=session_view.session_context,
         user_context=dict(user_context or {}),
         latest_plan_summary=session_view.artifacts.plan_summary,
+        has_plan=bool(session_view.artifacts.has_plan),
         recent_messages=list(session_view.recent_messages),
         pending_questions=list(session_view.pending_questions),
     )

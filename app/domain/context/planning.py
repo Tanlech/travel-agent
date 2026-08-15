@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from app.agents.schema import ReflectionResult, TripPlan
-from app.agents.schema.planning import PlanningRequest
-from app.domain.context.session import SessionContext
-from app.domain.context.user import UserContext
-from app.infrastructure.llm.schemas import ItineraryDraftSchema
+from app.domain.common.itinerary import ItineraryDraftSchema
+from app.domain.common.planning import PlanningRequest, TripPlan
+from app.domain.common.reflection import ReflectionResult
+from app.domain.common.session_context import SessionContext
+from app.domain.common.user import UserContext
 from app.tools.schema.attraction import AttractionResult
 from app.tools.schema.lodging import LodgingResult, SelectedLodging
 from app.tools.schema.transport import TransportResult

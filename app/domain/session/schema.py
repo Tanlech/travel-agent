@@ -3,20 +3,22 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.domain.common.chat import ChatMessage
 from app.domain.common.intent_type import IntentType, RevisionScope
+from app.domain.common.planning import TravelRequestFields
 from app.domain.common.session_context import SessionContextView
 from app.domain.common.stage import ConversationStage
-from app.domain.intent.schema import IntentPlanningRequest
 
 
-class SessionRequestState(IntentPlanningRequest):
-    """会话累计需求 = 意图层需求视图的扩展（字段与校验继承，消除双份定义漂移）。
-    演进权衡：extra="forbid" 随继承生效，未来删字段需配套旧数据迁移。
+class SessionRequestState(TravelRequestFields):
+    """会话累计需求（共享字段基类 + forbid；不再继承 intent 视图，可自由扩展会话专属字段）。
+
+    演进权衡：extra="forbid" 拦未知字段；merge 白名单由 model_fields 自动派生，扩展字段零维护。
     """
-    pass
+
+    model_config = ConfigDict(extra="forbid")
 
 class SessionArtifactSummary(BaseModel):
     # 产物摘要（revise 判定依赖 plan_summary）

@@ -22,6 +22,7 @@ from app.agents.schema.planning import (
 from app.agents.sparse.planning import build_cluster_plan_prompt, build_itinerary_render_prompt, build_skeleton_prompt
 from app.domain.context.builder import context_builder
 from app.domain.context.planning import PlanningContext
+from app.domain.common.planning import extract_plan_attractions
 from app.infrastructure.llm.client import get_llm_client
 from app.infrastructure.llm.schemas import ItineraryDraftSchema
 from app.domain.memory.manager import memory_manager
@@ -130,7 +131,7 @@ class PlanningAgent:
         memory_manager.persist_trip_memory(
             plan_input.user_id,
             request,
-            [item.name for item in (state.attraction_result.candidates if state.attraction_result else [])],
+            extract_plan_attractions(state.plan) if state.plan else [],
             list(request.avoid_spots or []),
             state.plan.summary if state.plan else draft.summary,
             response_mode=response_context.response_mode,

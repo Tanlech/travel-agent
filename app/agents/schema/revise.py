@@ -5,6 +5,8 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from app.agents.schema.planning import PlanningRequest, TripPlan
+from app.domain.common.session_context import SessionContext
+from app.domain.common.user import UserContext
 from app.infrastructure.llm.schemas import ItineraryDayPlan, ItineraryDraftSchema
 
 
@@ -28,25 +30,6 @@ class RevisionIntent(BaseModel):
     transport_replan: bool = False
     expected_outcomes: list[str] = Field(default_factory=list)
     forbidden_outcomes: list[str] = Field(default_factory=list)
-
-
-class ReviseUserContext(BaseModel):
-    preferred_styles: list[str] = Field(default_factory=list)
-    disliked_styles: list[str] = Field(default_factory=list)
-    accept_theme_park: bool | None = None
-    accept_nightlife: bool | None = None
-    pace_preference: Literal["slow", "balanced", "fast"] | None = None
-    family_friendly: bool | None = None
-    senior_friendly: bool | None = None
-
-
-class ReviseSessionContext(BaseModel):
-    session_id: str | None = None
-    confirmed_fields: list[str] = Field(default_factory=list)
-    pending_questions: list[str] = Field(default_factory=list)
-    conversation_stage: str = "revise_plan"
-    last_destination: str | None = None
-    revision_count: int = 0
 
 
 class ReviseExecutionPolicy(BaseModel):
@@ -108,8 +91,8 @@ class DayLevelReviseResultSchema(BaseModel):
 
 class ReviseAgentInput(BaseModel):
     request: PlanningRequest
-    user_context: ReviseUserContext
-    session_context: ReviseSessionContext
+    user_context: UserContext
+    session_context: SessionContext
     execution_policy: ReviseExecutionPolicy = Field(default_factory=ReviseExecutionPolicy)
     current_plan: TripPlan
     current_draft: ItineraryDraftSchema | None = None
@@ -117,6 +100,7 @@ class ReviseAgentInput(BaseModel):
     bootstrap_intent: dict[str, Any] = Field(default_factory=dict)
     prior_final_state: dict[str, Any] = Field(default_factory=dict)
     prior_planning_trace: list[dict[str, Any]] = Field(default_factory=list)
+    trip_history: list[dict[str, Any]] = Field(default_factory=list)  # 历史行程摘要（按目的地去重）
 
 
 class ReviseAgentOutput(BaseModel):
@@ -137,8 +121,6 @@ __all__ = [
     "ReviseArtifacts",
     "ReviseDebugTrace",
     "ReviseExecutionPolicy",
-    "ReviseSessionContext",
-    "ReviseUserContext",
     "RevisionImpactAnalysis",
     "RevisionIntent",
 ]

@@ -16,6 +16,7 @@ def build_revision_intent_prompt(
     raw_revision_message: str,
     user_context: Any,
     session_context: Any,
+    trip_history: list[Any] | None = None,
 ) -> str:
     draft_summary = _summarize_draft(current_draft) if current_draft else None
     plan_summary = _summarize_plan(current_plan)
@@ -35,10 +36,16 @@ def build_revision_intent_prompt(
         "",
         "[session_context]",
         json.dumps(_model_dump_any(session_context), ensure_ascii=False, indent=2),
-        "",
-        "[raw_revision_message]",
-        raw_revision_message,
     ]
+    if trip_history:
+        parts.extend(
+            [
+                "",
+                "[trip_history] 历史行程记忆（按目的地去重，供参考已去过哪/避坑）",
+                json.dumps(trip_history, ensure_ascii=False, indent=2),
+            ]
+        )
+    parts.extend(["", "[raw_revision_message]", raw_revision_message])
     return "\n".join(parts)
 
 

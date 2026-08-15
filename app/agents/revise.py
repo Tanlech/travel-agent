@@ -138,6 +138,7 @@ class ReviseAgent:
             raw_revision_message=current.user_message,
             user_context=agent_input.user_context,
             session_context=agent_input.session_context,
+            trip_history=agent_input.trip_history,
         )
         return llm_client.generate_revision_intent(
             system_prompt=REVISION_INTENT_PROMPT,
@@ -468,8 +469,8 @@ class ReviseAgent:
 
     def _review_and_repair(self, *, agent_output: ReviseAgentOutput, agent_input: ReviseAgentInput) -> ReviseAgentOutput:
         from app.domain.context.planning import PlanningContext
-        from app.domain.context.session import SessionContext
-        from app.domain.context.user import UserContext
+        from app.domain.common.session_context import SessionContext
+        from app.domain.common.user import UserContext
 
         state = PlanningContext(
             request=agent_input.request,

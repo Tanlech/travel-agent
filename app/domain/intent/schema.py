@@ -7,47 +7,18 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from app.domain.common.chat import ChatMessage
 from app.domain.common.dates import normalize_date
 from app.domain.common.intent_type import IntentType, RevisionScope
+from app.domain.common.planning import REQUIRED_PATCH_FIELDS, TravelRequestFields
 from app.domain.common.session_context import SessionContextView
 
 
-class IntentPlanningRequest(BaseModel):
-    """intent 层旅行需求视图，与 session 层 SessionRequestState 由 adapter 互转（extra="forbid" 防字段漂移）"""
+class IntentPlanningRequest(TravelRequestFields):
+    """intent 层旅行需求视图（共享字段基类 + forbid，patch 语义）
+
+    与 session 层 SessionRequestState 同源（都继承 TravelRequestFields），
+    由 adapter 互转（extra="forbid" 防字段漂移）
+    """
 
     model_config = ConfigDict(extra="forbid")
-
-    destination: str | None = None
-    start_date: str | None = None
-    end_date: str | None = None
-    days: int | None = None
-    departure_city: str | None = None
-    travelers: int | None = None  # 总人数
-    preferences: list[str] = Field(default_factory=list)
-    must_visit_spots: list[str] = Field(default_factory=list)
-    optional_spots: list[str] = Field(default_factory=list)
-    avoid_spots: list[str] = Field(default_factory=list)
-
-    @field_validator("days", "travelers")
-    @classmethod
-    def _check_positive_int(cls, v: int | None) -> int | None:
-        # 0/负值会污染下游 merge 与天数推导；None 表示未提供，放行
-        if v is not None and v <= 0:
-            raise ValueError("days/travelers must be positive integers")
-        return v
-
-    @model_validator(mode="after")
-    def _normalize_dates(self) -> "IntentPlanningRequest":
-        # 日期统一归一为 YYYY-MM-DD；end 早于 start 时对调
-        for field in ("start_date", "end_date"):
-            value = getattr(self, field)
-            if not value:
-                continue
-            normalized = normalize_date(value)
-            if normalized is None:
-                raise ValueError(f"invalid {field} {value!r}, expected YYYY-MM-DD")
-            setattr(self, field, normalized)
-        if self.start_date and self.end_date and self.end_date < self.start_date:
-            self.start_date, self.end_date = self.end_date, self.start_date
-        return self
 
 
 class IntentRecognitionInput(BaseModel):
@@ -61,6 +32,7 @@ class IntentRecognitionInput(BaseModel):
     planning_request: IntentPlanningRequest | None = None  # 当前结构化需求（上下文）
     session_context: SessionContextView = Field(default_factory=SessionContextView)  # 会话状态
     user_context: dict[str, Any] = Field(default_factory=dict)  # 用户长期偏好
+    trip_history: list[dict[str, Any]] = Field(default_factory=list)  # 历史行程（按目的地去重的轻量摘要）
     latest_plan_summary: dict[str, Any] | None = None  # 已有行程摘要（revise 判定依据）
     has_plan: bool = False  # 会话层产物落库标记（更可靠的"已有行程"判据）
     recent_messages: list[ChatMessage] = Field(default_factory=list)
@@ -165,8 +137,7 @@ _INT_PATCH_FIELDS = {
 }
 # 必须为正整数的字段（0/负值会产生异常下游状态）
 _POSITIVE_INT_FIELDS = {"days", "travelers"}
-# 必填关键字段（有序：追问顺序 = 定义顺序）；session 层直接引用
-REQUIRED_PATCH_FIELDS = ("destination", "start_date", "end_date")
+# 必填关键字段（有序：追问顺序 = 定义顺序）从 common 派生（定义见 domain.common.planning）
 
 
 def _clean_patch(patch: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:

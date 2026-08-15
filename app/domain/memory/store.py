@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any, Protocol
 
 from app.domain.memory.schema import TripMemory, UserMemory
@@ -7,6 +8,8 @@ from app.infrastructure.config.settings import settings
 from app.infrastructure.redis_client import get_redis
 
 """记忆存取：协议 + 内存实现 + Redis 实现（键 mem:user:{id} / mem:trip:{id}）"""
+
+logger = logging.getLogger(__name__)
 
 # 单个用户保留的行程记忆条数上限（超限裁剪最旧）
 MAX_TRIP_MEMORIES = 10
@@ -86,6 +89,8 @@ class RedisMemoryStore:
         try:
             return UserMemory.model_validate_json(raw)
         except Exception:
+            # 用户偏好数据损坏（半写/版本升级遗留）时按无记忆处理，并记录便于排查
+            logger.warning("user memory 数据损坏，按无记忆处理: %s", user_id)
             return None
 
     def save_user_memory(self, memory: UserMemory) -> None:
@@ -105,15 +110,21 @@ class RedisMemoryStore:
         pipe.execute()
 
     def load_trip_memories(self, user_id: str | None) -> list[TripMemory]:
-        """读取行程记忆列表（坏数据跳过）"""
+        """读取行程记忆列表（坏数据跳过；读时续期 TTL，与 user memory 口径一致）"""
         if not user_id:
             return []
+        key = _trip_key(user_id)
         memories: list[TripMemory] = []
-        for raw in self.redis.lrange(_trip_key(user_id), 0, -1):
+        for raw in self.redis.lrange(key, 0, -1):
             try:
                 memories.append(TripMemory.model_validate_json(raw))
             except Exception:
+                logger.warning("trip memory 数据损坏，跳过该条: %s", user_id)
                 continue
+        if memories:
+            # 读到内容即续期：否则用户偏好因每次读取续期长期存活、行程记忆却按最后写入时间过期，
+            # 活跃用户隔段时间回来 load_trip_history 会静默变空（intent/revise 历史参考失效）
+            self.redis.expire(key, settings.redis_ttl_seconds)
         return memories
 
 

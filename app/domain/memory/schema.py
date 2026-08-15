@@ -28,5 +28,5 @@ class TripMemory(BaseModel):
     accepted_spots: list[str] = Field(default_factory=list)  # 规划采纳的景点
     rejected_spots: list[str] = Field(default_factory=list)  # 用户明确排除的景点
     summary: str | None = None
-    response_mode: str | None = None  # 生成模式（final_plan / follow_up），非用户反馈
+    response_mode: str | None = None  # 生成模式（final_plan / follow_up / revise_plan），非用户反馈
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())

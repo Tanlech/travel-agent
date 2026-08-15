@@ -5,6 +5,10 @@ from datetime import date
 
 from app.domain.intent.schema import IntentRecognitionInput
 
+# 意图识别只需近几轮上下文：展示侧裁剪（存储不变），避免每次对话都把全量历史喂给 LLM 放大 token 成本
+_RECENT_MESSAGES_LIMIT = 4
+_TRIP_HISTORY_LIMIT = 5
+
 INTENT_RECOGNITION_SYSTEM_PROMPT = """
 你是旅游规划系统中的 intent recognition 模块，唯一职责是【用语义理解用户原话】并输出严格符合 schema 的 JSON，绝不生成行程。
 
@@ -52,9 +56,10 @@ def build_intent_recognition_prompt(intent_input: IntentRecognitionInput) -> str
         "planning_request": intent_input.planning_request.model_dump() if intent_input.planning_request else None,
         "session_context": intent_input.session_context,
         "user_context": intent_input.user_context,
+        "trip_history": (intent_input.trip_history or [])[-_TRIP_HISTORY_LIMIT:],
         "latest_plan_summary": intent_input.latest_plan_summary,
         "has_plan": intent_input.has_plan,
-        "recent_messages": [m.model_dump() for m in intent_input.recent_messages],
+        "recent_messages": [m.model_dump() for m in intent_input.recent_messages[-_RECENT_MESSAGES_LIMIT:]],
         "pending_questions": intent_input.pending_questions,
     }
     return json.dumps(payload, ensure_ascii=False, indent=2)

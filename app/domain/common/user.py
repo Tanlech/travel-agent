@@ -1,12 +1,12 @@
+"""跨层共享的用户偏好模型（唯一运行时模型，agents 层 re-export）"""
+
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-"""用户画像上下文（memory 融合结果，供规划/改稿代理读取）"""
-
 
 class UserContext(BaseModel):
-    """规划时用的用户偏好快照（字段与 UserMemory 对齐，来源 memory_manager.build_user_context）"""
+    """规划/改稿时用的用户偏好快照（字段与 UserMemory 对齐，来源 memory_manager.build_user_context）"""
 
     preferred_styles: list[str] = Field(default_factory=list)  # 正向偏好
     disliked_styles: list[str] = Field(default_factory=list)  # 负面偏好

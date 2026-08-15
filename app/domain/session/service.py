@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
 from app.domain.common.chat import ChatMessage, ChatRole
 from app.domain.common.stage import ConversationStage
+from app.domain.common.time import utc_now
 from app.domain.session.merge import merge_request_state
 from app.domain.session.schema import SessionApplyIntentResult, SessionIntentResult, SessionState
 
@@ -39,11 +38,12 @@ class SessionStateService:
         elif intent_result.intent_type == "new_plan":
             next_session.revision_count = 0
 
-        # 6. 生命周期：进入 closed 记录结束时间（仅一次）
+        # 6. 生命周期：进入 closed 记录结束时间（仅一次）；时间统一取一次，保证同请求内各时间戳一致
+        now = self._now()
         if next_session.conversation_stage == "closed" and not next_session.closed_at:
-            next_session.closed_at = self._now()
+            next_session.closed_at = now
 
-        next_session.updated_at = self._now()
+        next_session.updated_at = now
 
         return SessionApplyIntentResult(
             session_state=next_session,
@@ -70,10 +70,15 @@ class SessionStateService:
         # 确认：有产物才收尾 completed（无产物视为 LLM 误判，不推进）
         if intent_result.intent_type == "confirm" and session_state.artifacts.has_plan:
             return "completed"
-        # 问答/拒绝：仅对话型阶段写回 qa，不覆盖 completed 等持久阶段
+        # 问答/拒绝：仅对话型阶段写回 qa，不覆盖 completed 等持久阶段。
+        # 注意：revise_*/ready_to_plan 等"就绪执行"阶段也必须覆盖为 qa，
+        # 否则用户在改稿收集/待规划间隙闲聊（如"谢谢"）会被 stage_to_execution_mode 路由到
+        # revise/planning 分支执行动作，而不是正常回应（会话层唯一状态写入点在此收敛）
         if intent_result.intent_type in ("qa", "reject"):
             if session_state.conversation_stage in (
-                "qa", "collecting_destination", "collecting_dates", "collecting_requirements",
+                "qa",
+                "collecting_destination", "collecting_dates", "collecting_requirements",
+                "revise_collecting", "revise_ready", "ready_to_plan",
             ):
                 return "qa"
             return session_state.conversation_stage
@@ -95,6 +100,6 @@ class SessionStateService:
         return session_state.conversation_stage
 
     def _now(self) -> datetime:
-        return datetime.now(timezone.utc)
+        return utc_now()
 
 session_state_service = SessionStateService()

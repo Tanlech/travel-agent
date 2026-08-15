@@ -1,9 +1,10 @@
 """memory 层融合逻辑测试（使用 InMemoryStore 注入，不依赖 Redis）。"""
 
 from app.agents.schema.planning import PlanningRequest
-from app.domain.memory.manager import MemoryManager, _parse_preference_item
-from app.domain.memory.store import InMemoryStore, MAX_TRIP_MEMORIES
-from app.domain.memory.schema import TripMemory
+from app.domain.memory.manager import MAX_PREFERENCE_ITEMS, MemoryManager, _normalize_preference, _parse_preference_item
+from app.domain.memory.schema import TripMemory, UserMemory
+from app.domain.memory.store import InMemoryStore, MAX_TRIP_MEMORIES, RedisMemoryStore
+from app.infrastructure.config.settings import settings
 
 
 def _manager() -> MemoryManager:
@@ -113,3 +114,67 @@ def test_persist_trip_requires_user():
     store = InMemoryStore()
     MemoryManager(store=store).persist_trip_memory(None, _request(), [], [], "s")
     assert store.load_trip_memories(None) == []
+
+
+# ---- 偏好清洗与容量 ----
+
+def test_normalize_strips_middle_noise():
+    # 口语化长短语收敛为短词（中缀噪声二次剥离）
+    assert _normalize_preference("想去轻松一点的地方玩") == "轻松玩"
+    assert _normalize_preference("想要美食") == "美食"
+    # 已干净的短词保持不变（幂等）
+    assert _normalize_preference("轻松") == "轻松"
+
+
+def test_legacy_preferences_cleaned_on_read():
+    # 存量脏数据回溯清洗：旧记忆里未收敛的长短语在读取时重新归一
+    store = InMemoryStore()
+    m = MemoryManager(store=store)
+    store.save_user_memory(UserMemory(user_id="u1", preferred_styles=["想去轻松一点的地方玩", "美食"]))
+    ctx = m.build_user_context(_request(), user_id="u1")
+    assert ctx.preferred_styles == ["轻松玩", "美食"]
+
+
+def test_preferences_capped():
+    # 长期偏好容量上限：超限淘汰最早累积的条目
+    store = InMemoryStore()
+    m = MemoryManager(store=store)
+    items = [f"p{i}" for i in range(MAX_PREFERENCE_ITEMS + 5)]
+    store.save_user_memory(UserMemory(user_id="u1", preferred_styles=items))
+    ctx = m.build_user_context(_request(), user_id="u1")
+    assert len(ctx.preferred_styles) == MAX_PREFERENCE_ITEMS
+    assert ctx.preferred_styles[0] == "p5"  # 最旧 5 条被淘汰
+
+
+# ---- 行程记忆 TTL 续期（Redis 实现，用 fake client 验证） ----
+
+class _FakeRedis:
+    """仅实现 load_trip_memories 用到的 lrange/expire，记录 expire 调用"""
+
+    def __init__(self, raw_items: list[str]) -> None:
+        self._items = raw_items
+        self.expire_calls: list[tuple[str, int]] = []
+
+    def lrange(self, key: str, start: int, end: int) -> list[str]:
+        return self._items
+
+    def expire(self, key: str, ttl: int) -> int:
+        self.expire_calls.append((key, ttl))
+        return 1
+
+
+def test_load_trip_memories_renews_ttl():
+    # 读到内容即续期，与 user memory 口径一致，防止活跃用户行程记忆静默过期
+    fake = _FakeRedis([TripMemory(destination="北京", days=2).model_dump_json()])
+    store = RedisMemoryStore(redis_client=fake)
+    memories = store.load_trip_memories("u1")
+    assert len(memories) == 1
+    assert fake.expire_calls == [("mem:trip:u1", settings.redis_ttl_seconds)]
+
+
+def test_load_trip_memories_no_renew_when_empty():
+    # 无内容不续期（避免对不存在的 key 空续期）
+    fake = _FakeRedis([])
+    store = RedisMemoryStore(redis_client=fake)
+    assert store.load_trip_memories("u1") == []
+    assert fake.expire_calls == []

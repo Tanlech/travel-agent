@@ -4,12 +4,12 @@ import logging
 import re
 
 from app.domain.common.dates import normalize_date
+from app.domain.common.planning import compute_missing_fields
 from app.domain.intent.prompt import INTENT_RECOGNITION_SYSTEM_PROMPT, build_intent_recognition_prompt
 from app.domain.intent.schema import (
     IntentPlanningRequest,
     IntentRecognitionInput,
     IntentRecognitionOutput,
-    REQUIRED_PATCH_FIELDS,
 )
 from app.infrastructure.llm.client import get_llm_client
 
@@ -43,25 +43,34 @@ class IntentRecognizer:
         )
         return fallback_result
 
-    # 调用 LLM 做结构化意图识别
+    # 调用 LLM 做结构化意图识别（重试由 LLM client 内部负责：最多 3 次带解析失败反馈的重试，
+    # 这里不再外层重试，避免同一 prompt 重复发送放大 LLM 成本且无反馈收益）
     def _recognize_with_llm(self, intent_input: IntentRecognitionInput) -> IntentRecognitionOutput | None:
         llm_client = get_llm_client()
         if not llm_client.is_enabled():
             return None
         prompt = build_intent_recognition_prompt(intent_input)
-        result = llm_client.generate_intent_recognition(
+        return llm_client.generate_intent_recognition(
             system_prompt=INTENT_RECOGNITION_SYSTEM_PROMPT,
             user_prompt=prompt,
         )
-        if result is None:
-            return None
-        return result
 
     # LLM 不可用时的降级识别（按优先级）
     def _fallback(self, intent_input: IntentRecognitionInput) -> IntentRecognitionOutput:
         raw_message = (intent_input.raw_message or "").strip()
+        # 日期/人数/目的地各只提取一次，后续 confirm/unknown/qa 判定通过 parsed 复用，
+        # 避免同一消息被多条分支重复正则扫描
+        start_date, end_date = extract_dates(raw_message)
+        travelers = extract_travelers(raw_message)
+        destination = extract_destination(raw_message)
         # patch 只从原话解析，不把已累计 request 当 patch
-        request_patch = self._parse_patch_from_message(intent_input)
+        request_patch = self._parse_patch_from_message(
+            intent_input,
+            start_date=start_date,
+            end_date=end_date,
+            travelers=travelers,
+            destination=destination,
+        )
         # ---- 判定优先级 1：end_session ----
         # 告别语无条件优先
         if _is_end_session_message(raw_message):
@@ -93,7 +102,7 @@ class IntentRecognizer:
         if (
             self._has_existing_plan(intent_input)
             and _is_confirm_message(raw_message)
-            and not _has_planning_signal(raw_message)
+            and not _has_planning_signal(raw_message, parsed=(start_date, end_date, travelers, destination))
         ):
             return IntentRecognitionOutput(
                 intent_type="confirm",
@@ -102,7 +111,7 @@ class IntentRecognizer:
 
         # ---- 判定优先级 5：qa ----
         # 问候/闲聊/感谢，且不含任何规划信号
-        if _is_qa_message(raw_message):
+        if _is_qa_message(raw_message, parsed=(start_date, end_date, travelers, destination)):
             return IntentRecognitionOutput(
                 intent_type="qa",
                 reasoning="LLM intent 识别不可用，按问候/闲聊关键词判定为 qa。",
@@ -126,7 +135,7 @@ class IntentRecognizer:
                     reasoning="LLM intent 识别不可用，退回到字段缺失 fallback。",
                 )
             # 字段已齐但本轮无新信息/规划信号：不判 new_plan，避免闲聊触发重规划
-            if not request_patch and not _has_planning_signal(raw_message):
+            if not request_patch and not _has_planning_signal(raw_message, parsed=(start_date, end_date, travelers, destination)):
                 return IntentRecognitionOutput(
                     intent_type="unknown",
                     reasoning="LLM intent 识别不可用，字段已齐但本轮无新规划信息。",
@@ -160,30 +169,42 @@ class IntentRecognizer:
             return True
         return ctx.conversation_stage in ("revise_ready", "revise_collecting", "completed", "closed")
 
-    # 关键字段 = REQUIRED_PATCH_FIELDS（与 schema 同源）
+    # 关键字段缺失判定收敛在 common 层（与 session merge / orchestrator 校验共用同一实现）
     def _collect_missing_fields(self, request) -> list[str]:
-        return [f for f in REQUIRED_PATCH_FIELDS if not str(getattr(request, f, None) or "").strip()]
+        return compute_missing_fields(request)
 
     # 从本轮原话解析可可靠提取的 patch（fallback 专用，遵守 patch-only）
     # 只解析日期/人数/目的地；destination 仅当当前未确认时提取，避免补日期时顺口带出目的地覆盖已确认值
-    def _parse_patch_from_message(self, intent_input: IntentRecognitionInput) -> dict[str, object]:
+    # 已解析值可由调用方传入复用（fallback 全程一次解析），默认 None 时自行提取
+    def _parse_patch_from_message(
+        self,
+        intent_input: IntentRecognitionInput,
+        *,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        travelers: int | None = None,
+        destination: str | None = None,
+    ) -> dict[str, object]:
         raw_message = intent_input.raw_message or ""
         request = intent_input.planning_request
         patch: dict[str, object] = {}
 
-        start_date, end_date = extract_dates(raw_message)
+        if start_date is None and end_date is None:
+            start_date, end_date = extract_dates(raw_message)
         if start_date:
             patch["start_date"] = start_date
         if end_date:
             patch["end_date"] = end_date
 
-        travelers = extract_travelers(raw_message)
+        if travelers is None:
+            travelers = extract_travelers(raw_message)
         if travelers:
             patch["travelers"] = travelers
 
         current_destination = str(getattr(request, "destination", None) or "").strip() if request else ""
         if not current_destination:
-            destination = extract_destination(raw_message)
+            if destination is None:
+                destination = extract_destination(raw_message)
             if destination:
                 patch["destination"] = destination
 
@@ -380,8 +401,15 @@ def _is_confirm_message(message: str) -> bool:
     return _CONFIRM_RE.search(lowered) is not None
 
 
-def _has_planning_signal(message: str) -> bool:
-    """原话是否含规划信号（目的地/日期/人数任一），用于区分"好的，8月10号"与纯确认。"""
+def _has_planning_signal(message: str, *, parsed: tuple | None = None) -> bool:
+    """原话是否含规划信号（目的地/日期/人数任一），用于区分"好的，8月10号"与纯确认。
+
+    parsed 为 fallback 已解析的结果 (start_date, end_date, travelers, destination) 时复用，
+    避免同一消息在 confirm/unknown 判定间重复正则扫描；默认 None 时自行提取。
+    """
+    if parsed is not None:
+        start_date, end_date, travelers, destination = parsed
+        return bool(start_date or end_date or travelers or destination)
     start_date, end_date = extract_dates(message)
     if start_date or end_date:
         return True
@@ -392,8 +420,8 @@ def _has_planning_signal(message: str) -> bool:
     return False
 
 
-def _is_qa_message(message: str) -> bool:
+def _is_qa_message(message: str, *, parsed: tuple | None = None) -> bool:
     """判断原话是否为闲聊/问答（命中 qa 关键词且不含规划信号）。"""
     if not _QA_RE.search(message.lower()):
         return False
-    return not _has_planning_signal(message)
+    return not _has_planning_signal(message, parsed=parsed)

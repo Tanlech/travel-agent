@@ -17,6 +17,7 @@ def adapt_session_view_to_intent_input(
     session_id: str | None = None,
     user_id: str | None = None,
     user_context: dict[str, Any] | None = None,
+    trip_history: list[dict[str, Any]] | None = None,
 ) -> IntentRecognitionInput:
     """把 session 投影视图转换成 intent 输入对象（层间解耦）"""
     # 重建强类型 planning_request，字段漂移在此立即报错（extra="forbid"）
@@ -31,6 +32,7 @@ def adapt_session_view_to_intent_input(
         planning_request=planning_request,
         session_context=session_view.session_context,
         user_context=dict(user_context or {}),
+        trip_history=list(trip_history or []),
         latest_plan_summary=session_view.artifacts.plan_summary,
         has_plan=bool(session_view.artifacts.has_plan),
         recent_messages=list(session_view.recent_messages),

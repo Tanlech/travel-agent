@@ -26,7 +26,7 @@ class RepairUserContext(BaseModel):
     disliked_styles: list[str] = Field(default_factory=list)
     accept_theme_park: bool | None = None
     accept_nightlife: bool | None = None
-    pace_preference: Literal["slow", "balanced", "fast"] | None = None
+    pace_preference: Literal["relaxed", "dense"] | None = None
     family_friendly: bool | None = None
     senior_friendly: bool | None = None
 

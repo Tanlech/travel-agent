@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
+
+from app.domain.common.planning import PlanningRequest, TripPlan  # re-export（定义见 domain.common.planning）
 
 
 ToolName = Literal["weather", "attraction", "lodging", "transport", "none"]
@@ -17,98 +19,6 @@ class DialogueDecision(BaseModel):
     status: str
     missing_fields: list[str] = Field(default_factory=list)
     follow_up_question: str | None = None
-
-
-class TripPlan(BaseModel):
-    destination: str
-    summary: str
-    route_intent_summary: str | None = None
-    daily_plan: list[dict] = Field(default_factory=list)
-    stay_recommendation: list[dict] = Field(default_factory=list)
-    transport_plan: list[dict] = Field(default_factory=list)
-    weather_notes: list[str] = Field(default_factory=list)
-    alternatives: list[str] = Field(default_factory=list)
-    reflection: object | None = None
-
-
-class PlanningRequest(BaseModel):
-    destination: str
-    days: int
-    budget: int | None = None
-    start_date: str | None = None
-    end_date: str | None = None
-    departure_city: str | None = None
-    revision_message: str | None = None
-    travelers: list[str] = Field(default_factory=list)
-    preferences: list[str] = Field(default_factory=list)
-    must_visit_spots: list[str] = Field(default_factory=list)
-    optional_spots: list[str] = Field(default_factory=list)
-    avoid_spots: list[str] = Field(default_factory=list)
-
-    @field_validator("days")
-    @classmethod
-    def normalize_days(cls, value: int) -> int:
-        return max(1, int(value or 1))
-
-
-class PlanUserContext(BaseModel):
-    preferred_styles: list[str] = Field(default_factory=list)
-    disliked_styles: list[str] = Field(default_factory=list)
-    accept_theme_park: bool | None = None
-    accept_nightlife: bool | None = None
-    pace_preference: Literal["slow", "balanced", "fast"] | None = None
-    family_friendly: bool | None = None
-    senior_friendly: bool | None = None
-
-
-class PlanSessionContext(BaseModel):
-    session_id: str | None = None
-    confirmed_fields: list[str] = Field(default_factory=list)
-    pending_questions: list[str] = Field(default_factory=list)
-    conversation_stage: str = "new_plan"
-    last_destination: str | None = None
-    revision_count: int = 0
-
-
-class PlanExecutionPolicy(BaseModel):
-    response_mode: Literal["full_plan", "fast_plan", "revise_plan"] = "full_plan"
-    include_summary: bool = True
-    include_daily_plan: bool = True
-    include_stay_recommendation: bool = True
-    include_transport_plan: bool = True
-    include_weather_notes: bool = True
-    include_alternatives: bool = True
-    allow_tool_refresh: bool = True
-    max_repair_attempts: int = 1
-
-
-class PlanDebugTrace(BaseModel):
-    step: str
-    status: str | None = None
-    message: str | None = None
-    payload: dict[str, Any] = Field(default_factory=dict)
-    elapsed_seconds: float | None = None
-
-
-class PlanArtifacts(BaseModel):
-    draft: Any
-    plan: TripPlan
-
-
-class PlanAgentInput(BaseModel):
-    request: PlanningRequest
-    user_context: PlanUserContext
-    session_context: PlanSessionContext
-    execution_policy: PlanExecutionPolicy = Field(default_factory=PlanExecutionPolicy)
-
-
-class PlanAgentOutput(BaseModel):
-    artifacts: PlanArtifacts
-    planning_trace: list[PlanDebugTrace] = Field(default_factory=list)
-    final_state: dict[str, Any] = Field(default_factory=dict)
-    final_decision: dict[str, Any] = Field(default_factory=dict)
-    status: Literal["completed", "needs_follow_up", "failed"] = "completed"
-    summary: str | None = None
 
 
 class PlanInput(BaseModel):
@@ -307,15 +217,8 @@ __all__ = [
     "LodgingAnchorStatus",
     "LodgingFitnessResult",
     "PacingMode",
-    "PlanAgentInput",
-    "PlanAgentOutput",
-    "PlanArtifacts",
-    "PlanDebugTrace",
-    "PlanExecutionPolicy",
     "PlanInput",
     "PlanLoopInput",
-    "PlanSessionContext",
-    "PlanUserContext",
     "PlannerStatus",
     "PlanningBudgets",
     "PlanningDaySkeleton",

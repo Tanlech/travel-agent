@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Any, get_origin
 
-from app.domain.intent.schema import REQUIRED_PATCH_FIELDS
+from app.domain.common.planning import REQUIRED_PATCH_FIELDS, compute_missing_fields
 from app.domain.session.schema import SessionMergeResult, SessionRequestState
 
 
@@ -17,8 +17,10 @@ LIST_FIELDS = {
 # 必填关键字段（有序 = 追问顺序；与 intent 层单一来源）
 REQUIRED_FIELDS = REQUIRED_PATCH_FIELDS
 
+# compute_missing_fields 收敛在 common 层（merge / intent / orchestrator 三处共用同一实现）
 
-# 合并规则：白名单才参与；None/空串不覆盖；标量覆盖、列表整体替换
+
+# 合并规则：白名单才参与；None/空串不覆盖；标量覆盖、列表去重合并
 
 def merge_request_state(
     current_state: SessionRequestState | None,
@@ -40,12 +42,18 @@ def merge_request_state(
         if isinstance(value, str) and not value.strip():
             continue
 
-        # 列表字段强制转 list（防字符串拆字）；标量原样
-        # ⚠️ 列表当前是整体替换语义（追加需另做策略）
+        # 列表字段强制转 list（防字符串拆字）
         if field in LIST_FIELDS:
             normalized_value = value if isinstance(value, list) else [value]
-        else:
-            normalized_value = value
+            # 合并语义（patch-only）：intent 层只输出本轮新增项（prompt 明确"不输出完整 request"），
+            # 整体替换会让跨轮偏好互相覆盖丢失（先"喜欢美食"后"轻松一点"→"美食"被吞）；
+            # 去重追加到存量后；空列表/无新增视为未提供，不覆盖
+            base_items = [i for i in (next_dump.get(field) or []) if i]
+            merged_items = list(dict.fromkeys(base_items + [i for i in normalized_value if i]))
+            if merged_items != base_items:
+                next_dump[field] = merged_items
+                changed_fields.append(field)
+            continue
         if next_dump.get(field) != normalized_value:
             next_dump[field] = normalized_value
             changed_fields.append(field)
@@ -116,13 +124,3 @@ def _normalize_date_range(state: SessionRequestState, request_patch: dict[str, A
     if state.start_date and state.end_date:
         return state.model_copy(update={"days": None})
     return state
-
-
-# 当前状态还缺哪些必填字段（集合与顺序来自 REQUIRED_FIELDS，与意图层口径一致）
-
-def compute_missing_fields(request_state: SessionRequestState) -> list[str]:
-    missing: list[str] = []
-    for field in REQUIRED_FIELDS:
-        if not str(getattr(request_state, field, None) or "").strip():
-            missing.append(field)
-    return missing

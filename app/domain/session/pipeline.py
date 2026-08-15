@@ -56,6 +56,7 @@ class IntentSessionPipeline:
         request_id: str,
         raw_message: str,
         user_context: dict[str, Any] | None = None,
+        trip_history: list[dict[str, Any]] | None = None,
     ) -> SessionApplyIntentResult:
         # 空输入防护：不调 LLM，直接 unknown 兜底
         if not (raw_message or "").strip():
@@ -76,6 +77,7 @@ class IntentSessionPipeline:
             raw_message=raw_message,
             session_view=session_view,
             user_context=user_context,
+            trip_history=trip_history,
         )
 
         # 3. 意图识别（LLM 优先，失败走 fallback）→ intent_type + 本轮 patch
@@ -96,6 +98,7 @@ class IntentSessionPipeline:
         request_id: str,
         raw_message: str,
         user_context: dict[str, Any] | None = None,
+        trip_history: list[dict[str, Any]] | None = None,
     ) -> IntentRecognitionInput:
         # 只到步骤2，返回 intent 输入
         session_view = adapt_session_state_to_intent_view(session_state)
@@ -106,6 +109,7 @@ class IntentSessionPipeline:
             raw_message=raw_message,
             session_view=session_view,
             user_context=user_context,
+            trip_history=trip_history,
         )
 
     def recognize_only(
@@ -115,6 +119,7 @@ class IntentSessionPipeline:
         request_id: str,
         raw_message: str,
         user_context: dict[str, Any] | None = None,
+        trip_history: list[dict[str, Any]] | None = None,
     ) -> IntentRecognitionOutput:
         # 只识别不应用
         intent_input = self.build_intent_input(
@@ -122,6 +127,7 @@ class IntentSessionPipeline:
             request_id=request_id,
             raw_message=raw_message,
             user_context=user_context,
+            trip_history=trip_history,
         )
         return self.intent_service.recognize(intent_input)
 

@@ -14,12 +14,12 @@ logger = logging.getLogger(__name__)
 
 
 class SessionRepository(Protocol):
-    """会话读写接口（含 artifacts，乐观并发：版本不一致返回 False，由调用方重新加载重试）"""
+    """会话读写接口（含 artifacts，乐观并发：版本不一致返回 None，由调用方重新加载重试）"""
 
     def load(self, session_id: str) -> SessionState | None: ...
-    def save(self, session_state: SessionState) -> bool: ...
+    def save(self, session_state: SessionState) -> SessionState | None: ...
     def load_artifacts(self, session_id: str) -> tuple[dict | None, dict | None]: ...
-    def save_with_artifacts(self, session_state: SessionState, plan: dict | None, draft: dict | None) -> bool: ...
+    def save_with_artifacts(self, session_state: SessionState, plan: dict | None, draft: dict | None) -> SessionState | None: ...
 
 
 def _state_key(session_id: str) -> str:
@@ -80,20 +80,24 @@ class RedisSessionRepository:
             self.redis.expire(_artifacts_key(session_id), settings.redis_ttl_seconds)
         return state
 
-    def save(self, session_state: SessionState) -> bool:
-        """乐观保存：版本一致才写入并 +1；冲突返回 False（调用方重新 load 后重试）"""
+    def save(self, session_state: SessionState) -> SessionState | None:
+        """乐观保存：版本一致才写入并 +1；冲突返回 None（调用方重新 load 后重试）。
+
+        成功时返回升版后的新 state：调用方后续再保存应以它为新基底，
+        避免"磁盘已 +1、内存仍是旧版本"导致同请求内第二次保存被误判冲突。
+        """
         return self._optimistic_save(session_state, artifacts_payload=None)
 
-    def save_with_artifacts(self, session_state: SessionState, plan: dict | None, draft: dict | None) -> bool:
+    def save_with_artifacts(self, session_state: SessionState, plan: dict | None, draft: dict | None) -> SessionState | None:
         """乐观保存 + 产物原子提交：state 与 artifacts 同事务写入，冲突整体回滚（防摘要错位）"""
         return self._optimistic_save(
             session_state,
             artifacts_payload=json.dumps({"plan": plan, "draft": draft}, ensure_ascii=False),
         )
 
-    def _optimistic_save(self, session_state: SessionState, artifacts_payload: str | None, max_attempts: int = 5) -> bool:
+    def _optimistic_save(self, session_state: SessionState, artifacts_payload: str | None, max_attempts: int = 5) -> SessionState | None:
         if not session_state.session_id:
-            return False
+            return None
         key = _state_key(session_state.session_id)
         pipe = self.redis.pipeline()
         for _ in range(max_attempts):
@@ -101,7 +105,7 @@ class RedisSessionRepository:
                 pipe.watch(key)
                 if _extract_version(pipe.get(key)) != session_state.version:
                     pipe.unwatch()
-                    return False
+                    return None
                 # 版本 +1 后写入（后续 save 才能正确比较）
                 bumped = session_state.model_copy(update={"version": session_state.version + 1})
                 pipe.multi()
@@ -109,13 +113,13 @@ class RedisSessionRepository:
                 if artifacts_payload is not None:
                     pipe.set(_artifacts_key(session_state.session_id), artifacts_payload, ex=settings.redis_ttl_seconds)
                 pipe.execute()
-                return True
+                return bumped
             except redis.WatchError:
                 # WATCH 期间 key 被其他客户端修改，重置后重放
                 pipe.reset()
                 continue
-        # 持续竞争时放弃本次写入，避免无限循环；返回 False 由调用方重试
-        return False
+        # 持续竞争时放弃本次写入，避免无限循环；返回 None 由调用方重试
+        return None
 
     def load_artifacts(self, session_id: str) -> tuple[dict | None, dict | None]:
         if not session_id:

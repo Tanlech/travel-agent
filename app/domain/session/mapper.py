@@ -2,9 +2,8 @@ from __future__ import annotations
 
 from datetime import date
 
-from app.agents.schema.planning import PlanningRequest
-from app.agents.schema.revise import ReviseSessionContext, ReviseUserContext
-from app.domain.context.session import SessionContext
+from app.domain.common.planning import PlanningRequest
+from app.domain.common.session_context import SessionContext, compute_confirmed_fields
 from app.domain.session.schema import SessionState
 
 
@@ -32,7 +31,7 @@ def session_state_to_planning_request(state: SessionState) -> PlanningRequest:
     """SessionState 累计需求 → PlanningRequest（days 缺省从日期推算；travelers 转 list；budget 恒 None）"""
     req = state.current_request_state
     days = req.days if req.days else _compute_days(req.start_date, req.end_date)
-    travelers: list[str] = [f"{req.travelers} adults"] if req.travelers else []
+    travelers: list[str] = [f"{req.travelers} 位成人"] if req.travelers else []
     return PlanningRequest(
         destination=req.destination or "",
         days=days,
@@ -51,13 +50,7 @@ def session_state_to_planning_request(state: SessionState) -> PlanningRequest:
 def session_state_to_session_context(state: SessionState) -> SessionContext:
     """SessionState → SessionContext（planning_agent 内部仍读 SessionContext，这里做桥接）"""
     req = state.current_request_state
-    confirmed: list[str] = []
-    if req.destination:
-        confirmed.append("destination")
-    if req.start_date:
-        confirmed.append("start_date")
-    if req.end_date:
-        confirmed.append("end_date")
+    confirmed = compute_confirmed_fields(req)
     return SessionContext(
         session_id=state.session_id,
         confirmed_fields=confirmed,
@@ -65,34 +58,6 @@ def session_state_to_session_context(state: SessionState) -> SessionContext:
         conversation_stage=state.conversation_stage,
         last_destination=req.destination,
         revision_count=state.revision_count,
-    )
-
-
-def session_context_to_revise_session_context(ctx: SessionContext) -> ReviseSessionContext:
-    """显式映射 SessionContext → ReviseSessionContext（防 ** 展开静默出错）"""
-    return ReviseSessionContext(
-        session_id=ctx.session_id,
-        confirmed_fields=list(ctx.confirmed_fields),
-        pending_questions=list(ctx.pending_questions),
-        conversation_stage=ctx.conversation_stage,
-        last_destination=ctx.last_destination,
-        revision_count=ctx.revision_count,
-    )
-
-
-def user_context_to_revise_user_context(user_context: dict) -> ReviseUserContext:
-    """UserContext(dict) → ReviseUserContext（pace: relaxed/dense → slow/fast）"""
-    pace_map = {"relaxed": "slow", "dense": "fast"}
-    raw_pace = user_context.get("pace_preference")
-    revise_pace = pace_map.get(raw_pace) if raw_pace else None
-    return ReviseUserContext(
-        preferred_styles=list(user_context.get("preferred_styles") or []),
-        disliked_styles=list(user_context.get("disliked_styles") or []),
-        accept_theme_park=user_context.get("accept_theme_park"),
-        accept_nightlife=user_context.get("accept_nightlife"),
-        pace_preference=revise_pace,
-        family_friendly=user_context.get("family_friendly"),
-        senior_friendly=user_context.get("senior_friendly"),
     )
 
 

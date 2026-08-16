@@ -88,20 +88,12 @@ class TripPlan(BaseModel):
 
 
 def compute_missing_fields(request: Any) -> list[str]:
-    """返回必填关键字段（destination/start_date/end_date）中缺失的列表。
-
-    会话 merge / 意图识别 / 规划兜底校验三处共用，字段口径单一来源（REQUIRED_PATCH_FIELDS）。
-    空串视为缺失（与 merge 层 trim 语义一致）。
-    """
+    """返回必填关键字段（destination/start_date/end_date）中缺失的列表"""
     return [f for f in REQUIRED_PATCH_FIELDS if not str(getattr(request, f, None) or "").strip()]
 
 
 def extract_plan_attractions(plan: Any) -> list[str]:
-    """从行程（TripPlan 或 dict）的 daily_plan 提取最终采纳的景点标题（去重保序）。
-
-    供行程记忆落库使用，planning / revise 两处写入路径共用同一口径：
-    只记录最终进入行程的景点，避免把候选景点误记为"已采纳"。
-    """
+    """从行程（TripPlan 或 dict）的 daily_plan 提取最终采纳的景点标题（去重保序）"""
     daily_plan = getattr(plan, "daily_plan", None)
     if daily_plan is None and isinstance(plan, dict):
         daily_plan = plan.get("daily_plan") or []

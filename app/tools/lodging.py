@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from app.infrastructure.amap.client import amap_client
-from app.infrastructure.llm.client import get_llm_client
+from app.infrastructure.amap_client import amap_client
+from app.infrastructure.llm_client import get_llm_client
 from app.tools.prompt.lodging import LODGING_TOOL_PROMPT
 from app.tools.schema.lodging import LodgingCandidate, LodgingInput, LodgingResult, SelectedLodging
 

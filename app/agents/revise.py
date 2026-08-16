@@ -17,8 +17,8 @@ from app.agents.schema.revise import (
     RevisionIntent,
 )
 from app.agents.sparse.revise import build_block_level_revise_prompt, build_day_level_revise_prompt, build_global_revise_prompt, build_revision_intent_prompt
-from app.infrastructure.llm.client import get_llm_client
-from app.infrastructure.llm.schemas import ItineraryDraftSchema
+from app.domain.common.itinerary import ItineraryDraftSchema
+from app.infrastructure.llm_client import get_llm_client
 from app.tools.attraction import attraction_tool
 from app.tools.lodging import lodging_tool
 from app.tools.schema.attraction import AttractionInput

@@ -7,7 +7,7 @@ from typing import Any, Protocol
 import redis
 
 from app.domain.session.schema import SessionState
-from app.infrastructure.config.settings import settings
+from app.infrastructure.settings import settings
 from app.infrastructure.redis_client import get_redis
 
 logger = logging.getLogger(__name__)
@@ -45,10 +45,9 @@ def _extract_version(raw: str | None) -> int:
 
 
 class RedisSessionRepository:
-    """SessionState 的 Redis 持久化实现。
-
+    """SessionState 的 Redis 持久化实现
     session:{id}:state 存完整 JSON（含版本号）；session:{id}:artifacts 存产物 payload；
-    两者带 TTL，读 state 时顺带续期（活跃会话不失效）
+    两者带 TTL，读 state 时顺带续期
     """
 
     def __init__(self, redis_client: Any | None = None) -> None:
@@ -81,11 +80,7 @@ class RedisSessionRepository:
         return state
 
     def save(self, session_state: SessionState) -> SessionState | None:
-        """乐观保存：版本一致才写入并 +1；冲突返回 None（调用方重新 load 后重试）。
-
-        成功时返回升版后的新 state：调用方后续再保存应以它为新基底，
-        避免"磁盘已 +1、内存仍是旧版本"导致同请求内第二次保存被误判冲突。
-        """
+        """乐观保存：版本一致才写入并 +1；冲突返回 None（调用方重新 load 后重试）"""
         return self._optimistic_save(session_state, artifacts_payload=None)
 
     def save_with_artifacts(self, session_state: SessionState, plan: dict | None, draft: dict | None) -> SessionState | None:

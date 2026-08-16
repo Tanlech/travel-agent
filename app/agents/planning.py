@@ -23,8 +23,8 @@ from app.agents.sparse.planning import build_cluster_plan_prompt, build_itinerar
 from app.domain.context.builder import context_builder
 from app.domain.context.planning import PlanningContext
 from app.domain.common.planning import extract_plan_attractions
-from app.infrastructure.llm.client import get_llm_client
-from app.infrastructure.llm.schemas import ItineraryDraftSchema
+from app.domain.common.itinerary import ItineraryDraftSchema
+from app.infrastructure.llm_client import get_llm_client
 from app.domain.memory.manager import memory_manager
 from app.tools.attraction import attraction_tool
 from app.tools.lodging import lodging_tool

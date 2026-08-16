@@ -1,11 +1,11 @@
-"""意图类型与改稿范围（intent / session 层共享，避免重复定义）。"""
+"""意图类型与改稿范围（intent / session 层共享，避免重复定义）"""
 
 from enum import StrEnum
 from typing import Literal
 
 
 class IntentType(StrEnum):
-    """意图类型（成员值即序列化值）。"""
+    """意图类型（成员值即序列化值）"""
 
     NEW_PLAN = "new_plan"            # 新一轮规划（首次/重新给足信息）
     REVISE_PLAN = "revise_plan"      # 修改已有行程（换/调/改）

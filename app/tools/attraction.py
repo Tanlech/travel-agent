@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 import time
 
-from app.infrastructure.amap.client import amap_client
-from app.infrastructure.llm.client import get_llm_client
+from app.infrastructure.amap_client import amap_client
+from app.infrastructure.llm_client import get_llm_client
 from app.tools.prompt.attraction import ATTRACTION_AGENT_PROMPT
 from app.tools.schema.attraction import AttractionCandidate, AttractionInput, AttractionResult
 

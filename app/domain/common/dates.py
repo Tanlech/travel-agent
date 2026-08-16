@@ -1,4 +1,4 @@
-"""日期归一化工具（intent / session 层共享，统一合法性 + 跨年口径）。"""
+"""日期归一化工具（intent / session 层共享，统一合法性 + 跨年口径）"""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""通用对话消息结构（intent / session 层共享，避免业务模型反向依赖）。"""
+"""通用对话消息结构（intent / session 层共享，避免业务模型反向依赖）"""
 
 from __future__ import annotations
 

@@ -8,9 +8,9 @@ from app.domain.memory.manager import memory_manager
 """上下文工厂：统一构造 PlanningContext（内存态只读，不含会话状态写回）"""
 
 def _session_context_from_request(request: PlanningRequest, session_id: str | None) -> SessionContext:
-    """从 PlanningRequest 推导最小 SessionContext（planning_agent 内部兼容用）
-    会话状态已由 SessionState（Redis）统一持久化；这里只构造 planning_agent 需要的
-    只读会话视图，不再读写内存态会话记忆，避免与新会话层双写分叉。
+    """从 PlanningRequest 推导最小 SessionContext
+    会话状态已由 SessionState（Redis）统一持久化；
+    只读会话视图，不再读写内存态会话记忆，避免与新会话层双写分叉
     """
     confirmed = compute_confirmed_fields(request)
     return SessionContext(

@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from typing import Any
 
-from openai import OpenAI
+from openai import AuthenticationError, OpenAI
 from pydantic import ValidationError
 
-from app.infrastructure.config.settings import settings
-from app.agents.schema.planning import ClusterPlanning, LodgingFitnessResult, PlanningNextAction, PlanningSkeleton
+from app.agents.schema.planning import ClusterPlanning, LodgingFitnessResult, PlanningSkeleton
+from app.agents.schema.repair import RepairProposalSchema
 from app.agents.schema.revise import BlockLevelReviseResultSchema, DayLevelReviseResultSchema, RevisionIntent
+from app.domain.common.itinerary import ItineraryDraftSchema
 from app.domain.intent.schema import IntentRecognitionOutput
-from app.infrastructure.llm.schemas import ItineraryDraftSchema, RepairProposalSchema
+from app.infrastructure.settings import settings
 
 
 class LLMClient:
@@ -22,7 +25,7 @@ class LLMClient:
         self.timeout = settings.llm_timeout
         self.max_retries = 2
         self.client = None
-        self.last_debug_info: dict[str, Any] = {}
+        self._last_debug = threading.local()
         if self.enabled:
             self.client = OpenAI(
                 api_key=settings.openai_api_key,
@@ -33,17 +36,14 @@ class LLMClient:
     def is_enabled(self) -> bool:
         return self.enabled and self.client is not None
 
-    def generate_planning_next_action(self, *, system_prompt: str, user_prompt: str) -> PlanningNextAction | None:
-        return self._generate_structured(
-            schema=PlanningNextAction,
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            retry_hints=[
-                "Return JSON only.",
-                "Choose only one next_tool.",
-                "If enough information has been collected, return enough_to_plan with next_tool='none'.",
-            ],
-        )
+    @property
+    def last_debug_info(self) -> dict[str, Any]:
+        """当前线程最近一次调用的调试信息"""
+        return getattr(self._last_debug, "value", {})
+
+    @last_debug_info.setter
+    def last_debug_info(self, value: dict[str, Any]) -> None:
+        self._last_debug.value = value
 
     def generate_cluster_plan(self, *, system_prompt: str, user_prompt: str) -> ClusterPlanning | None:
         return self._generate_structured(
@@ -240,12 +240,19 @@ class LLMClient:
                     messages=messages,
                 )
             except Exception as exc:
+                if isinstance(exc, AuthenticationError):
+                    # 认证失败重试无意义，直接终止
+                    self.last_debug_info = {"status": "auth_error", "reason": f"{type(exc).__name__}: {exc}"}
+                    return None
                 last_error = f"api_error:{type(exc).__name__}"
                 self.last_debug_info = {
                     "status": "api_error",
                     "attempt": attempt,
                     "reason": last_error,
                 }
+                if attempt < self.max_retries:
+                    # 简单线性退避后重试
+                    time.sleep(0.5 * (attempt + 1))
                 continue
 
             content = response.choices[0].message.content if response.choices else None

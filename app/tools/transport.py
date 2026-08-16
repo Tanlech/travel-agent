@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.infrastructure.amap.client import amap_client
+from app.infrastructure.amap_client import amap_client
 from app.tools.schema.transport import TransportResult, TaxiRoute, TransitOptionSummary, TransitRoute, TransitRouteStep, WalkRoute
 
 
@@ -55,11 +55,15 @@ class TransportTool:
     def _fetch_routes(self, city: str, origin: dict, destination: dict) -> dict[str, dict | None]:
         origin_coords = self._coords(origin)
         destination_coords = self._coords(destination)
-        return {
-            "walk": amap_client.plan_walking(origin=origin_coords, destination=destination_coords),
-            "taxi": amap_client.plan_driving(origin=origin_coords, destination=destination_coords),
-            "transit": amap_client.plan_transit(origin=origin_coords, destination=destination_coords, city=city),
-        }
+        try:
+            return {
+                "walk": amap_client.plan_walking(origin=origin_coords, destination=destination_coords),
+                "taxi": amap_client.plan_driving(origin=origin_coords, destination=destination_coords),
+                "transit": amap_client.plan_transit(origin=origin_coords, destination=destination_coords, city=city),
+            }
+        except Exception:
+            # 高德不可用/报错时降级为无路线，由 _query_one 置 error 提示
+            return {"walk": None, "taxi": None, "transit": None}
 
     def _build_walk_route(self, walk: dict | None) -> WalkRoute | None:
         if not walk:
@@ -184,10 +188,16 @@ class TransportTool:
     def _resolve_poi(self, city: str, name: str | None) -> dict | None:
         if not name:
             return None
-        pois = amap_client.search_pois(keywords=name, city=city, city_limit=True)
+        try:
+            pois = amap_client.search_pois(keywords=name, city=city, city_limit=True)
+        except Exception:
+            return None
         if pois:
             return pois[0]
-        geocoded = amap_client.geocode(address=name, city=city)
+        try:
+            geocoded = amap_client.geocode(address=name, city=city)
+        except Exception:
+            return None
         if geocoded:
             return {"name": name, "lng": geocoded.get("lng"), "lat": geocoded.get("lat")}
         return None

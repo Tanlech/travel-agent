@@ -13,10 +13,7 @@ from app.domain.common.stage import ConversationStage
 
 
 class SessionRequestState(TravelRequestFields):
-    """会话累计需求（共享字段基类 + forbid；不再继承 intent 视图，可自由扩展会话专属字段）。
-
-    演进权衡：extra="forbid" 拦未知字段；merge 白名单由 model_fields 自动派生，扩展字段零维护。
-    """
+    """会话累计需求（共享字段基类 + forbid；不再继承 intent 视图，可自由扩展会话专属字段）"""
 
     model_config = ConfigDict(extra="forbid")
 

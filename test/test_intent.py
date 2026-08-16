@@ -98,6 +98,9 @@ def test_extract_travelers():
 
 def test_extract_destination():
     assert extract_destination("我想去北京玩") == "北京"
+    # 改稿改口句的动词残留不得被当成目的地（宁可追问，不让脏值入库）
+    assert extract_destination("不去了，改成上海") is None
+    assert extract_destination("我要去成都改成北京") is None
 
 
 # ---- schema 消毒 ----

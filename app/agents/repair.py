@@ -6,8 +6,8 @@ from app.agents.prompt.repair import REPAIR_AGENT_PROMPT
 from app.agents.schema.repair import RepairResult
 from app.agents.sparse.repair import build_repair_user_prompt
 from app.domain.context.planning import PlanningContext
-from app.infrastructure.llm.client import get_llm_client
-from app.infrastructure.llm.schemas import ItineraryDayPlan, ItineraryDraftSchema, ItineraryTimeBlockSchema
+from app.domain.common.itinerary import ItineraryDayPlan, ItineraryDraftSchema, ItineraryTimeBlockSchema
+from app.infrastructure.llm_client import get_llm_client
 from app.tools.attraction import attraction_tool
 from app.tools.schema.attraction import AttractionCandidate, AttractionInput
 

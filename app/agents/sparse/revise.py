@@ -5,7 +5,7 @@ from typing import Any
 
 from app.agents.schema.planning import PlanningRequest, TripPlan
 from app.agents.schema.revise import RevisionImpactAnalysis, RevisionIntent
-from app.infrastructure.llm.schemas import ItineraryDraftSchema
+from app.domain.common.itinerary import ItineraryDraftSchema
 
 
 def build_revision_intent_prompt(

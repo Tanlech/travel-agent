@@ -11,8 +11,7 @@ _CONFIRMABLE_FIELDS = ("destination", "start_date", "end_date")
 
 
 def compute_confirmed_fields(request: object) -> list[str]:
-    """从累计需求对象推导已确认字段（任一非空即确认）。
-
+    """从累计需求对象推导已确认字段（任一非空即确认）
     供 SessionState / PlanningRequest 两类累计需求共用，避免 builder/mapper 各写一份判定。
     """
     return [field for field in _CONFIRMABLE_FIELDS if getattr(request, field, None)]

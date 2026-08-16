@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 from app.agents.schema.planning import PlanningRequest, TripPlan
 from app.domain.common.session_context import SessionContext
 from app.domain.common.user import UserContext
-from app.infrastructure.llm.schemas import ItineraryDayPlan, ItineraryDraftSchema
+from app.domain.common.itinerary import ItineraryDayPlan, ItineraryDraftSchema
 
 
 class RevisionIntent(BaseModel):

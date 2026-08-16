@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from app.domain.common.chat import ChatMessage, ChatRole
 from app.domain.common.stage import ConversationStage
 from app.domain.common.time import utc_now
@@ -19,7 +21,6 @@ class SessionStateService:
         intent_result: SessionIntentResult,
     ) -> SessionApplyIntentResult:
         # 1. merge：本轮 patch 累计进需求状态，算出还缺哪些字段
-        #    （missing 基于 merge 后的 next_state 判定，而非旧 state）
         merge_result = merge_request_state(session_state.current_request_state, intent_result.extracted_request_patch)
 
         # 2. 深拷贝避免修改入参
@@ -70,10 +71,7 @@ class SessionStateService:
         # 确认：有产物才收尾 completed（无产物视为 LLM 误判，不推进）
         if intent_result.intent_type == "confirm" and session_state.artifacts.has_plan:
             return "completed"
-        # 问答/拒绝：仅对话型阶段写回 qa，不覆盖 completed 等持久阶段。
-        # 注意：revise_*/ready_to_plan 等"就绪执行"阶段也必须覆盖为 qa，
-        # 否则用户在改稿收集/待规划间隙闲聊（如"谢谢"）会被 stage_to_execution_mode 路由到
-        # revise/planning 分支执行动作，而不是正常回应（会话层唯一状态写入点在此收敛）
+        # 问答/拒绝：仅对话型阶段写回 qa，不覆盖 completed 等持久阶段
         if intent_result.intent_type in ("qa", "reject"):
             if session_state.conversation_stage in (
                 "qa",

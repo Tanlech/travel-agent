@@ -11,7 +11,7 @@ from app.domain.intent.schema import (
     IntentRecognitionInput,
     IntentRecognitionOutput,
 )
-from app.infrastructure.llm.client import get_llm_client
+from app.infrastructure.llm_client import get_llm_client
 
 logger = logging.getLogger(__name__)
 
@@ -219,11 +219,7 @@ intent_recognizer = IntentRecognizer()
 # ============================================================
 
 def extract_dates(message: str) -> tuple[str | None, str | None]:
-    """从中文消息解析起止日期，返回 (start_date, end_date)，格式 YYYY-MM-DD。
-
-    支持：2026-08-10 到 2026-08-12；8月10号到8月12号（可跨月/省后缀）；单个日期（end 返回 None）。
-    统一交给 normalize_date 校验，非法日期返回 None，不产出坏数据。
-    """
+    """从中文消息解析起止日期，返回 (start_date, end_date)，格式 YYYY-MM-DD"""
     text = message.replace("～", "到").replace("~", "到").replace("—", "到").replace("–", "到").replace("至", "到")
 
     # 双完整日期：2026-08-10 到 2026-08-12
@@ -297,8 +293,12 @@ _PLANNING_VERB_SIGNALS = (
 
 
 def _is_clean_destination_name(name: str) -> bool:
-    """目的地候选后置校验：剔除启发式提取残留的疑问/陈述碎片。"""
-    for token in ("有", "怎么", "什么", "吗", "呢", "要", "是", "好玩", "推荐", "看看", "呀"):
+    """目的地候选后置校验：剔除启发式提取残留的疑问/陈述碎片。
+
+    "改/换"是改稿动词残留信号（如"不去了，改成上海"→"不了改成上海"），
+    宁可返回 None 交给追问，也不让脏值当确认目的地入库。
+    """
+    for token in ("有", "怎么", "什么", "吗", "呢", "要", "是", "好玩", "推荐", "看看", "呀", "改", "换"):
         if token in name:
             return False
     return True
@@ -384,17 +384,17 @@ def _infer_revision_scope(message: str) -> str:
 
 
 def _is_reject_message(message: str) -> bool:
-    """判断原话是否为明确拒绝。"""
+    """判断原话是否为明确拒绝"""
     return _REJECT_RE.search(message) is not None
 
 
 def _is_end_session_message(message: str) -> bool:
-    """判断原话是否为告别/结束语。"""
+    """判断原话是否为告别/结束语"""
     return _END_SESSION_RE.search(message) is not None
 
 
 def _is_confirm_message(message: str) -> bool:
-    """判断原话是否为确认（排除"不行/行不行"）。"""
+    """判断原话是否为确认（排除"不行/行不行"）"""
     lowered = message.lower()
     if "不行" in lowered or "行不行" in lowered:
         return False
@@ -402,11 +402,7 @@ def _is_confirm_message(message: str) -> bool:
 
 
 def _has_planning_signal(message: str, *, parsed: tuple | None = None) -> bool:
-    """原话是否含规划信号（目的地/日期/人数任一），用于区分"好的，8月10号"与纯确认。
-
-    parsed 为 fallback 已解析的结果 (start_date, end_date, travelers, destination) 时复用，
-    避免同一消息在 confirm/unknown 判定间重复正则扫描；默认 None 时自行提取。
-    """
+    """原话是否含规划信号（目的地/日期/人数任一）"""
     if parsed is not None:
         start_date, end_date, travelers, destination = parsed
         return bool(start_date or end_date or travelers or destination)

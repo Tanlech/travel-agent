@@ -4,7 +4,7 @@ from app.agents.schema.planning import PlanningRequest
 from app.domain.memory.manager import MAX_PREFERENCE_ITEMS, MemoryManager, _normalize_preference, _parse_preference_item
 from app.domain.memory.schema import TripMemory, UserMemory
 from app.domain.memory.store import InMemoryStore, MAX_TRIP_MEMORIES, RedisMemoryStore
-from app.infrastructure.config.settings import settings
+from app.infrastructure.settings import settings
 
 
 def _manager() -> MemoryManager:
@@ -120,7 +120,7 @@ def test_persist_trip_requires_user():
 
 def test_normalize_strips_middle_noise():
     # 口语化长短语收敛为短词（中缀噪声二次剥离）
-    assert _normalize_preference("想去轻松一点的地方玩") == "轻松玩"
+    assert _normalize_preference("想去轻松一点的地方玩") == "轻松"
     assert _normalize_preference("想要美食") == "美食"
     # 已干净的短词保持不变（幂等）
     assert _normalize_preference("轻松") == "轻松"
@@ -132,7 +132,7 @@ def test_legacy_preferences_cleaned_on_read():
     m = MemoryManager(store=store)
     store.save_user_memory(UserMemory(user_id="u1", preferred_styles=["想去轻松一点的地方玩", "美食"]))
     ctx = m.build_user_context(_request(), user_id="u1")
-    assert ctx.preferred_styles == ["轻松玩", "美食"]
+    assert ctx.preferred_styles == ["轻松", "美食"]
 
 
 def test_preferences_capped():

@@ -7,7 +7,24 @@ from pydantic import BaseModel, Field
 from app.agents.schema.planning import PlanningRequest, TripPlan
 from app.agents.schema.reflection import ReflectionResult
 from app.agents.schema.revise import RevisionIntent
-from app.infrastructure.llm.schemas import ItineraryDraftSchema, RepairDayPlanSchema
+from app.domain.common.itinerary import ItineraryDraftSchema, ItinerarySpotRefSchema
+
+
+class RepairDayPlanSchema(BaseModel):
+    """修复后的单日安排（repair 产物，定义在 agents 层）"""
+
+    day_index: int
+    primary_area: str | None = None
+    spots: list[ItinerarySpotRefSchema] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+    rationale: str | None = None
+
+
+class RepairProposalSchema(BaseModel):
+    destination: str
+    summary: str
+    modified_days: list[int] = Field(default_factory=list)
+    day_plans: list[RepairDayPlanSchema] = Field(default_factory=list)
 
 
 class RepairInstruction(BaseModel):
@@ -93,10 +110,12 @@ class RepairAgentOutput(BaseModel):
 __all__ = [
     "RepairAgentOutput",
     "RepairArtifacts",
+    "RepairDayPlanSchema",
     "RepairDebugTrace",
     "RepairExecutionPolicy",
     "RepairInput",
     "RepairInstruction",
+    "RepairProposalSchema",
     "RepairResult",
     "RepairSessionContext",
     "RepairUserContext",

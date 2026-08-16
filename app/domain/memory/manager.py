@@ -22,7 +22,8 @@ _PREFERENCE_STRIP_SUFFIXES = ("一点", "一些", "些", "就行", "就好", "�
 # 中缀噪声短语（剥前后缀后仍残留的修饰成分，二次剥离收敛为短词，如"轻松一点的地方玩"→"轻松"）
 # 只用多字短语，避免单字误伤实词（如"看"拆"看展"、"逛"拆"逛街"）
 _PREFERENCE_MIDDLE_NOISE = (
-    "的地方", "的地方玩", "那边", "去玩", "玩一下", "去看看", "逛一逛", "转一转",
+    # 长短语优先，避免"的地方"先于"的地方玩"匹配导致残渣（"轻松的地方玩"→"轻松玩"）
+    "的地方玩", "的地方", "去玩", "玩一下", "去看看", "逛一逛", "转一转",
     "一些", "一点", "就行", "就好",
 )
 
@@ -31,7 +32,7 @@ MAX_PREFERENCE_ITEMS = 20
 
 
 def _normalize_preference(item: str) -> str:
-    """收敛口语化偏好为短词：去常见前后缀与中缀噪声（如"想轻松一点"→"轻松"）；无法收敛时原样返回。"""
+    """收敛口语化偏好为短词：去常见前后缀与中缀噪声（如"想轻松一点"→"轻松"）；无法收敛时原样返回"""
     text = item.strip()
     for prefix in _PREFERENCE_STRIP_PREFIXES:
         if text.startswith(prefix):
@@ -78,8 +79,7 @@ class MemoryManager:
         """融合 stored 记忆与当前请求偏好 → UserContext（负面偏好进 disliked_styles）"""
         stored = self._store.load_user_memory(user_id)
         if stored is not None:
-            # 回溯清洗历史偏好：旧数据可能含未收敛的长短语（如"想去轻松一点的地方玩"），
-            # 读取时重新归一为短词（幂等：已干净的词不变），并裁剪超限条目，
+            # 回溯清洗历史偏好，读取时重新归一为短词（幂等：已干净的词不变），并裁剪超限条目，
             # 让喂给 LLM 的记忆始终是短词，避免污染只增不减
             cleaned_preferred = _cap_preferences(_normalize_preferences(stored.preferred_styles))
             cleaned_disliked = _cap_preferences(_normalize_preferences(stored.disliked_styles))

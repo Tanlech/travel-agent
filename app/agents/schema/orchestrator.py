@@ -40,15 +40,6 @@ class IntentParseResult(BaseModel):
     reasoning: str | None = None
 
 
-class TokenBudgetPolicy(BaseModel):
-    total_budget: int = 12000
-    intent_budget: int = 800
-    planning_budget: int = 5000
-    revise_budget: int = 4000
-    reflection_budget: int = 1500
-    repair_budget: int = 1500
-
-
 class TelemetryContext(BaseModel):
     trace_id: str | None = None
     task_id: str | None = None
@@ -96,5 +87,4 @@ __all__ = [
     "IntentParseResult",
     "OrchestratorDecisionTrace",
     "TelemetryContext",
-    "TokenBudgetPolicy",
 ]

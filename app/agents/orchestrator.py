@@ -9,8 +9,7 @@ from app.agents.revise import revise_agent
 from app.agents.schema.orchestrator import AgentRequest, AgentResponse, DialogueDecision, ExecutionPlan
 from app.agents.schema.planning import PlanInput, PlanningRequest, TripPlan
 from app.agents.schema.revise import RevisionIntent, ReviseAgentInput, ReviseExecutionPolicy
-from app.budgets.policy import default_budget_policy
-from app.budgets.tracker import TokenBudgetTracker
+from app.observability.token_budget import TokenBudgetTracker, default_budget_policy
 from app.domain.common.planning import compute_missing_fields, extract_plan_attractions
 from app.domain.common.time import utc_now
 from app.domain.common.user import UserContext
@@ -27,8 +26,8 @@ from app.domain.session.pipeline import intent_session_pipeline
 from app.domain.session.repository import redis_session_repository
 from app.domain.session.schema import SessionIntentResult, SessionState
 from app.domain.session.service import session_state_service
-from app.infrastructure.llm.client import get_llm_client
-from app.infrastructure.llm.schemas import ItineraryDraftSchema
+from app.domain.common.itinerary import ItineraryDraftSchema
+from app.infrastructure.llm_client import get_llm_client
 from app.observability.monitoring import app_logger, metrics_recorder
 from app.observability.tracing import new_trace_id
 
@@ -304,16 +303,12 @@ class TravelOrchestrator:
                     session_id=session_id,
                 )
             # 改稿消息中新表达的偏好并入长期记忆（与规划分支 persist_user_memory 对齐）：
-            # 改稿常伴随偏好微调（如"换成都市的酒店"），不能只存在于本轮、规划分支却能沉淀
+            # 改稿常伴随偏好微调（如"换成都市的酒店"），不能只存在于本轮、规划分支却能沉淀；
+            # 基于 merge 后的完整 request 重建 user_context，布尔/否定偏好
+            # （如"不要乐园"→accept_theme_park=False）与规划分支走同一逻辑
             patch_preferences = intent.extracted_request_patch.get("preferences") or []
             if patch_preferences and user_id:
-                merged_user_context = UserContext(**_user_context)
-                merged_user_context.preferred_styles = list(
-                    dict.fromkeys(
-                        [p for p in merged_user_context.preferred_styles if p]
-                        + [p for p in patch_preferences if p]
-                    )
-                )
+                merged_user_context = memory_manager.build_user_context(planning_request, user_id=user_id)
                 memory_manager.persist_user_memory(user_id, merged_user_context)
             # 改稿也落行程记忆（与状态提交解耦，尽力而为）：让历史行程持续累积，
             # 避免 revise 后会话里只剩最新摘要、更早的规划信息无法追溯

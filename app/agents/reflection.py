@@ -4,7 +4,7 @@ from app.agents.prompt.reflection import REFLECTION_AGENT_PROMPT
 from app.agents.schema.reflection import ReflectionIssue, ReflectionLLMResult, ReflectionResult
 from app.agents.sparse.reflection import build_reflection_user_prompt
 from app.domain.context.planning import PlanningContext
-from app.infrastructure.llm.client import get_llm_client
+from app.infrastructure.llm_client import get_llm_client
 
 
 class PlanningReflection:

@@ -5,12 +5,12 @@ from typing import Any
 
 import httpx
 
-from app.infrastructure.config.settings import settings
+from app.infrastructure.settings import settings
 
 
 @dataclass(slots=True)
 class AmapClientConfig:
-    """高德地图客户端配置。"""
+    """高德地图客户端配置"""
 
     api_key: str | None = None
     base_url: str = "https://restapi.amap.com"
@@ -19,14 +19,14 @@ class AmapClientConfig:
     @classmethod
     def from_env(cls) -> "AmapClientConfig":
         return cls(
-            api_key=getattr(settings, "amap_key", None) or getattr(settings, "amap_api_key", None),
+            api_key=settings.amap_key or settings.amap_api_key,
             base_url=settings.amap_base_url,
             timeout_seconds=settings.amap_timeout_seconds,
         )
 
 
 class AmapClient:
-    """高德地图 API 客户端。"""
+    """高德地图 API 客户端"""
 
     def __init__(self, config: AmapClientConfig | None = None) -> None:
         self.config = config or AmapClientConfig.from_env()
@@ -92,44 +92,6 @@ class AmapClient:
             )
         return normalized
 
-    def get_poi_by_id(self, *, poi_id: str) -> dict[str, Any] | None:
-        data = self.get_json("/v5/place/detail", {"id": poi_id})
-        pois = data.get("pois") or []
-        if not pois:
-            return None
-        item = pois[0]
-        lng, lat = self._split_location(item.get("location"))
-        return {
-            "poi_id": item.get("id"),
-            "name": item.get("name"),
-            "lng": lng,
-            "lat": lat,
-            "adcode": item.get("adcode"),
-            "address": item.get("address"),
-            "type": item.get("type"),
-            "cityname": item.get("cityname"),
-            "pname": item.get("pname"),
-            "adname": item.get("adname"),
-        }
-
-    def measure_distance(self, *, origin: tuple[float, float], destination: tuple[float, float]) -> dict[str, Any] | None:
-        data = self.get_json(
-            "/v3/distance",
-            {
-                "origins": f"{origin[0]},{origin[1]}",
-                "destination": f"{destination[0]},{destination[1]}",
-                "type": 1,
-            },
-        )
-        results = data.get("results") or []
-        if not results:
-            return None
-        item = results[0]
-        return {
-            "distance_meters": self._safe_float(item.get("distance")),
-            "duration_seconds": self._safe_float(item.get("duration")),
-        }
-
     def plan_transit(self, *, origin: tuple[float, float], destination: tuple[float, float], city: str) -> dict[str, Any] | None:
         data = self.get_json(
             "/v3/direction/transit/integrated",
@@ -153,8 +115,6 @@ class AmapClient:
             "price": self._safe_float(best.get("cost")),
             "walking_distance": self._safe_float(best.get("walking_distance")),
             "transits": transits,
-            "best": best,
-            "raw": data,
         }
 
     def plan_driving(self, *, origin: tuple[float, float], destination: tuple[float, float]) -> dict[str, Any] | None:
@@ -177,7 +137,8 @@ class AmapClient:
             "distance_meters": self._safe_float(best.get("distance")),
             "duration_seconds": self._safe_float(best.get("duration")),
             "traffic_lights": self._safe_int(best.get("traffic_lights")),
-            "raw": data,
+            # taxi_cost 位于 route 级，取整条路线的预估出租车费
+            "cost": self._safe_float(route.get("taxi_cost")),
         }
 
     def plan_walking(self, *, origin: tuple[float, float], destination: tuple[float, float]) -> dict[str, Any] | None:
@@ -197,39 +158,14 @@ class AmapClient:
             "mode": "walking",
             "distance_meters": self._safe_float(best.get("distance")),
             "duration_seconds": self._safe_float(best.get("duration")),
-            "steps": best.get("steps") or [],
-            "raw": data,
         }
 
-    def plan_bicycling(self, *, origin: tuple[float, float], destination: tuple[float, float]) -> dict[str, Any] | None:
-        data = self.get_json(
-            "/v4/direction/bicycling",
-            {
-                "origin": f"{origin[0]},{origin[1]}",
-                "destination": f"{destination[0]},{destination[1]}",
-            },
-        )
-        if int(data.get("errcode") or 0) != 0:
-            return None
-        data_node = data.get("data") or {}
-        paths = data_node.get("paths") or []
-        if not paths:
-            return None
-        best = paths[0]
-        return {
-            "mode": "bicycling",
-            "distance_meters": self._safe_float(best.get("distance")),
-            "duration_seconds": self._safe_float(best.get("duration")),
-            "steps": best.get("steps") or [],
-            "raw": data,
-        }
-
-    def get_weather_forecast(self, *, city: str, extensions: str = "all") -> dict[str, Any] | None:
+    def get_weather_forecast(self, *, city: str) -> dict[str, Any] | None:
         data = self.get_json(
             "/v3/weather/weatherInfo",
             {
                 "city": city,
-                "extensions": extensions,
+                "extensions": "all",
                 "output": "JSON",
             },
         )

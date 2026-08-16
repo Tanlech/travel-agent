@@ -17,9 +17,6 @@ LIST_FIELDS = {
 # 必填关键字段（有序 = 追问顺序；与 intent 层单一来源）
 REQUIRED_FIELDS = REQUIRED_PATCH_FIELDS
 
-# compute_missing_fields 收敛在 common 层（merge / intent / orchestrator 三处共用同一实现）
-
-
 # 合并规则：白名单才参与；None/空串不覆盖；标量覆盖、列表去重合并
 
 def merge_request_state(
@@ -45,8 +42,7 @@ def merge_request_state(
         # 列表字段强制转 list（防字符串拆字）
         if field in LIST_FIELDS:
             normalized_value = value if isinstance(value, list) else [value]
-            # 合并语义（patch-only）：intent 层只输出本轮新增项（prompt 明确"不输出完整 request"），
-            # 整体替换会让跨轮偏好互相覆盖丢失（先"喜欢美食"后"轻松一点"→"美食"被吞）；
+            # 合并语义（patch-only）：intent 层只输出本轮新增项（prompt 明确"不输出完整 request"）
             # 去重追加到存量后；空列表/无新增视为未提供，不覆盖
             base_items = [i for i in (next_dump.get(field) or []) if i]
             merged_items = list(dict.fromkeys(base_items + [i for i in normalized_value if i]))
@@ -82,13 +78,7 @@ def merge_request_state(
 
 
 def _normalize_date_range(state: SessionRequestState, request_patch: dict[str, Any] | None = None) -> SessionRequestState:
-    """日期区间与天数的一致性归一化（幂等）。
-    - start/end 反向时对调（不依赖 days，改期残留也能自愈）
-    - patch 显式给 days 时以 days 为准重算区间（用户"改天数"不被区间权威吞掉）
-    - 区间完整且非显式 days：区间权威，清 days，杜绝"区间 3 天但 days=5"矛盾
-    - start/end 单端 + days：补全另一端并清 days
-    - 无 days 或无任何一端日期时不动
-    """
+    """日期区间与天数的一致性归一化（幂等）"""
     patch = request_patch or {}
     patch_days = "days" in patch and patch.get("days") is not None
     # 方向修正（不依赖 days，改期残留的反向区间也能自愈）

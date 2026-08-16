@@ -49,7 +49,7 @@ class IntentRecognitionInput(BaseModel):
 
 
 class IntentRecognitionOutput(BaseModel):
-    """意图识别输出。patch-only：只返回本轮新增/修改字段，累计合并由 session 层负责。"""
+    """意图识别输出。patch-only：只返回本轮新增/修改字段，累计合并由 session 层负责"""
 
     intent_type: IntentType = IntentType.UNKNOWN
     extracted_request_patch: dict[str, Any] = Field(default_factory=dict)  # 本轮新增/修改的字段
@@ -154,11 +154,12 @@ def _clean_patch(patch: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         else:
             cleaned[field] = normalized
 
-    # 成对日期为权威：方向修正 + 清 days（天数由区间派生；单端日期+days 的补全交给 session merge）
+    # 成对日期：仅做方向修正，不在这里清 days——
+    # 显式 days 由 session merge 层按"patch 显式给 days 时以 days 为准重算区间"处理，
+    # 避免用户显式天数（如"8月10到12号，玩5天"）被区间推导静默吞掉
     if "start_date" in cleaned and "end_date" in cleaned:
         if cleaned["start_date"] > cleaned["end_date"]:
             cleaned["start_date"], cleaned["end_date"] = cleaned["end_date"], cleaned["start_date"]
-        cleaned.pop("days", None)
     return cleaned, dropped
 
 

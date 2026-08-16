@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any
 
-from app.infrastructure.amap.client import amap_client
+from app.infrastructure.amap_client import amap_client
 from app.tools.schema.weather import WeatherDay, WeatherResult
 
 

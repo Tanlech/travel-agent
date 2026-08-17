@@ -194,10 +194,18 @@ def _summarize_attraction_candidates(candidates: list[dict[str, Any]]) -> list[d
 
 
 def _summarize_lodging_candidates(candidates: list[dict[str, Any]], selected_lodging: dict[str, Any] | None) -> dict[str, Any]:
+    fields = ("poi_id", "name", "area", "price", "address", "tel")
     return {
-        "selected_lodging": selected_lodging,
-        "candidates": candidates[:5],
-        "warning": _lodging_warning(selected_lodging),
+        "provisional_top_candidate": (
+            {field: selected_lodging.get(field) for field in fields if selected_lodging.get(field) is not None}
+            if selected_lodging
+            else None
+        ),
+        "candidates": [
+            {field: item.get(field) for field in fields if item.get(field) is not None}
+            for item in candidates[:5]
+        ],
+        "instruction": "候选已由 lodging_tool 按当前条件筛选排序；请结合完整行程自行选择，不要虚构候选外酒店。",
     }
 
 
@@ -233,18 +241,6 @@ def _is_light_experience(duration: Any, reason: Any) -> bool:
     hours = float(duration or 0)
     reason_text = str(reason or "")
     return hours <= 1.8 or any(keyword in reason_text for keyword in ["慢行", "步行", "轻松", "漫步"])
-
-
-def _lodging_warning(selected_lodging: dict[str, Any] | None) -> str | None:
-    if not selected_lodging:
-        return "暂无明确住宿锚点。"
-    name = str(selected_lodging.get("name") or "")
-    area = str(selected_lodging.get("area") or "")
-    if area in {"延庆区", "怀柔区", "密云区"}:
-        return "当前选中的住宿位于远郊，未必适合作为整趟行程的全程锚点。"
-    if any(keyword in name for keyword in ["咖啡", "公园", "博物馆", "景区"]):
-        return "当前选中的住宿名称存在疑似非酒店实体风险，请谨慎采用。"
-    return None
 
 
 def _weather_risk(weather_text: Any) -> str:

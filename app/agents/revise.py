@@ -655,7 +655,7 @@ class ReviseAgent:
                 destination=agent_input.request.destination,
                 budget=agent_input.request.budget,
                 preferences=preferences,
-                avoid_spots=list(agent_input.request.avoid_spots) + ["民宿", "旅馆招待所"],
+                avoid_keywords=list(agent_input.request.avoid_spots) + ["招待所"],
                 spots=spots,
             )
         )

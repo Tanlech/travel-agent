@@ -8,7 +8,7 @@ from app.domain.common.reflection import ReflectionResult
 from app.domain.common.session_context import SessionContext
 from app.domain.common.user import UserContext
 from app.tools.schema.attraction import AttractionResult
-from app.tools.schema.lodging import LodgingResult, SelectedLodging
+from app.tools.schema.lodging import LodgingCandidate, LodgingResult
 from app.tools.schema.transport import TransportResult
 from app.tools.schema.weather import WeatherResult
 
@@ -24,7 +24,7 @@ class PlanningContext(BaseModel):
     weather_result: WeatherResult | None = None
     attraction_result: AttractionResult | None = None
     lodging_result: LodgingResult | None = None
-    selected_lodging: SelectedLodging | None = None
+    selected_lodging: LodgingCandidate | None = None
     transport_results: list[TransportResult] = Field(default_factory=list)
     draft: ItineraryDraftSchema | None = None  # 行程稿（中间产物）
     plan: TripPlan | None = None  # 对外行程结果

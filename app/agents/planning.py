@@ -333,7 +333,7 @@ class PlanningAgent:
 
     def _refresh_lodging(self, state: PlanningContext, fitness: LodgingFitnessResult) -> None:
         state.lodging_result = self._run_lodging(state.request, state)
-        state.selected_lodging = state.lodging_result.selected_lodging if state.lodging_result else None
+        state.selected_lodging = state.lodging_result.candidates[0] if state.lodging_result and state.lodging_result.candidates else None
         state.trace.append(
             {
                 "step": "tool_lodging_refresh",
@@ -602,7 +602,7 @@ class PlanningAgent:
             }
         if tool_name == "lodging":
             state.lodging_result = self._run_lodging(request, state)
-            state.selected_lodging = state.lodging_result.selected_lodging if state.lodging_result else None
+            state.selected_lodging = state.lodging_result.candidates[0] if state.lodging_result and state.lodging_result.candidates else None
             return {
                 "tool": "lodging",
                 "candidate_count": len(state.lodging_result.candidates) if state.lodging_result else 0,
@@ -644,7 +644,7 @@ class PlanningAgent:
                 destination=request.destination,
                 budget=request.budget,
                 preferences=preferences,
-                avoid_spots=list(request.avoid_spots) + ["民宿", "旅馆招待所"],
+                avoid_keywords=list(request.avoid_spots) + ["招待所"],
                 spots=spots,
             )
         )

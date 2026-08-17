@@ -239,7 +239,7 @@ class PlanningReflection:
         for index, day in enumerate(state.draft.day_plans):
             if index >= len(weather_days):
                 break
-            weather = weather_days[index].weather or ""
+            weather = weather_days[index].weather_day or ""
             high_temp = self._extract_high_temperature(weather_days[index].temperature_range)
             attraction_blocks = [block for block in day.time_blocks if block.item_type == "attraction"]
             if not attraction_blocks:

@@ -11,6 +11,13 @@ class Settings(BaseSettings):
     amap_base_url: str = "https://restapi.amap.com"
     amap_timeout_seconds: float = 10.0
 
+    # 和风天气（天气数据源，替代高德天气）
+    qweather_api_key: str | None = None  # 天气预报接口专用 key（/v7/weather/*）
+    qweather_geo_api_key: str | None = None  # 城市搜索接口专用 key（/geo/v2/*）
+    qweather_host: str | None = None  # 项目自定义域名，例如 mk54e6x6rw.re.qweatherapi.com
+    qweather_forecast_days: int = 30  # 订阅支持的最大预报天数（端点选择上限），和风最多 30 天，按订阅级别调整
+    qweather_timeout_seconds: float = 10.0
+
     redis_url: str | None = None
     redis_ttl_seconds: int = 86400
 

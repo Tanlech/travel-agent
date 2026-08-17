@@ -548,7 +548,7 @@ class PlanningAgent:
                 if self._is_displayable_lodging(hotel.name):
                     stay_recommendation.append({"name": hotel.name, "area": hotel.area})
 
-        weather_notes = [f"{item.date}: {item.weather} {item.temperature_range or ''}".strip() for item in weather_days]
+        weather_notes = [f"{item.date}: {item.weather_day} {item.temperature_range or ''}".strip() for item in weather_days]
         transport_plan = self._build_transport_summary(draft)
 
         return TripPlan(

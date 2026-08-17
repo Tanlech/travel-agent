@@ -219,7 +219,8 @@ class PlanningRepair:
         request = state.request
         candidates = list(state.attraction_result.candidates if state.attraction_result else [])
         weather_days = state.weather_result.daily if state.weather_result else []
-        weather = weather_days[day_index - 1].weather if 0 <= day_index - 1 < len(weather_days) else ""
+        day_weather = weather_days[day_index - 1] if 0 <= day_index - 1 < len(weather_days) else None
+        weather = day_weather.weather_day if day_weather else ""
 
         must_keep = {title for task in tasks for title in task.must_keep_titles}
         remove_titles = {title for task in tasks for title in task.remove_titles}
@@ -336,10 +337,10 @@ class PlanningRepair:
         for day_idx, day in enumerate(draft.day_plans):
             if day_idx < len(weather_days):
                 weather_day = weather_days[day_idx]
-                weather_note = f"天气：{weather_day.weather} {weather_day.temperature_range or ''}".strip()
+                weather_note = f"天气：{weather_day.weather_day} {weather_day.temperature_range or ''}".strip()
                 day.notes = [note for note in day.notes if not note.startswith("天气：")]
                 day.notes.insert(0, weather_note)
-                if any(keyword in (weather_day.weather or "") for keyword in ["雷阵雨", "暴雨", "阵雨"]):
+                if any(keyword in (weather_day.weather_day or "") for keyword in ["雷阵雨", "暴雨", "阵雨"]):
                     extra_note = "当日存在降雨风险，优先选择室内或半室内项目，并预留机动调整时间。"
                     if extra_note not in day.notes:
                         day.notes.append(extra_note)

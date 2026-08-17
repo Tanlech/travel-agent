@@ -71,11 +71,13 @@ class AmapClient:
         if city:
             params["city"] = city
             params["citylimit"] = "true" if city_limit else "false"
-        data = self.get_json("/v5/place/text", params)
+        # 用 v3/place/text：v5 同参数不返回评分/星级/电话等字段
+        data = self.get_json("/v3/place/text", params)
         pois = data.get("pois") or []
         normalized: list[dict[str, Any]] = []
         for item in pois:
             lng, lat = self._split_location(item.get("location"))
+            biz_ext = item.get("biz_ext") or {}
             normalized.append(
                 {
                     "poi_id": item.get("id"),
@@ -88,9 +90,28 @@ class AmapClient:
                     "cityname": item.get("cityname"),
                     "pname": item.get("pname"),
                     "adname": item.get("adname"),
+                    "tel": self._safe_str(item.get("tel")),
+                    "business_area": self._safe_str(item.get("business_area")),
+                    "keytag": self._safe_str(item.get("keytag")),
+                    "price": self._safe_str(biz_ext.get("lowest_price") or biz_ext.get("cost")),
+                    "rating": self._safe_str(biz_ext.get("rating")),
+                    "star": self._extract_star(item.get("type")),
                 }
             )
         return normalized
+
+    def _extract_star(self, poi_type: Any) -> str | None:
+        """从 POI type 提取星级（"四星级宾馆" → "4"），无星级返回 None"""
+        text = str(poi_type or "")
+        for star_name, num in (("五星级", "5"), ("四星级", "4"), ("三星级", "3"), ("二星级", "2"), ("一星级", "1")):
+            if star_name in text:
+                return num
+        return None
+
+    def _safe_str(self, value: Any) -> str | None:
+        if value in (None, "", [], {}):
+            return None
+        return str(value)
 
     def plan_transit(self, *, origin: tuple[float, float], destination: tuple[float, float], city: str) -> dict[str, Any] | None:
         data = self.get_json(

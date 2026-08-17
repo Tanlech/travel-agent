@@ -5,8 +5,11 @@ from pydantic import BaseModel
 
 class WeatherDay(BaseModel):
     date: str
-    weather: str = ""
+    weather_day: str = ""
     temperature_range: str | None = None
+    wind: str | None = None
+    humidity: str | None = None
+    precip: str | None = None
 
 
 class WeatherResult(BaseModel):
@@ -16,3 +19,5 @@ class WeatherResult(BaseModel):
     daily: list[WeatherDay]
     source: str | None = None
     error: str | None = None
+    coverage_start: str | None = None
+    coverage_end: str | None = None

@@ -1,10 +1,12 @@
-"""weather tool 手动测试：修改下方输入（城市 + 日期范围），运行后打印天气输出"""
+"""weather tool 手动测试：修改下方输入（城市 + 日期范围），运行后打印给 agent 的天气 JSON 输出"""
 
+import json
 from pathlib import Path
 
 import pytest
 
 from app.infrastructure.qweather_client import qweather_client
+from app.tools.schema.weather import WeatherInput
 from app.tools.weather import weather_tool
 
 
@@ -37,11 +39,9 @@ def test_weather_run():
     end_time = "2026-09-01"
     # ============================
 
-    result = weather_tool.run(city=city, start_time=start_time, end_time=end_time)
+    result = weather_tool.run(WeatherInput(city=city, start_time=start_time, end_time=end_time))
 
-    print(f"\n>>> city={city}  {start_time} ~ {end_time}")
-    if result.error:
-        print(f"<<< error: {result.error}")
-    for day in result.daily:
-        print("<<<", day)
+    print(f"\n输入: city={city}  {start_time} ~ {end_time}")
+    print("输出（给 agent 的 JSON）:")
+    print(json.dumps(result.model_dump(), indent=2, ensure_ascii=False))
     assert result.daily

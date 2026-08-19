@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
-from app.agents.prompt.planning import PLAN_CLUSTER_PROMPT, PLAN_RENDER_PROMPT, PLAN_SKELETON_PROMPT
+from app.agents.prompt.planning import (
+    PLAN_CLUSTER_PROMPT,
+    PLAN_RENDER_PROMPT,
+    PLAN_SKELETON_PROMPT,
+    PLAN_TOOL_COLLECTION_PROMPT,
+)
 from app.agents.schema.planning import (
     CandidateCluster,
     ClusterPlanInput,
@@ -28,8 +33,11 @@ from app.infrastructure.llm_client import get_llm_client
 from app.domain.memory.manager import memory_manager
 from app.tools.attraction import attraction_tool
 from app.tools.lodging import lodging_tool
+from app.tools.registry import build_openai_tools
 from app.tools.schema.attraction import AttractionInput
 from app.tools.schema.lodging import LodgingInput
+from app.tools.schema.transport import TransportInput
+from app.tools.schema.weather import WeatherInput
 from app.tools.transport import transport_tool
 from app.tools.weather import weather_tool
 
@@ -52,7 +60,7 @@ class PlanningAgent:
 
         state.trace.append({"step": "dialogue_ready", "status": dialogue_decision.status, "response_mode": response_context.response_mode})
 
-        observation_log = self._run_planner_loop(state)
+        observation_log = self._run_planner_loop_with_tools(state)
         if not state.attraction_result:
             attraction_observation = self._execute_tool_step(state, "attraction")
             observation_log.append(attraction_observation)
@@ -200,6 +208,113 @@ class PlanningAgent:
         )
         state.trace.append({"step": "planner_loop_finish", "reason": finish_reason})
         return observation_log
+
+    def _run_planner_loop_with_tools(self, state: PlanningContext) -> list[dict]:
+        """function calling 驱动的工具收集：LLM 自主决定调用哪些工具、传什么参数。
+
+        LLM 不可用或调用失败时降级到固定顺序（_run_planner_loop）。
+        """
+        llm_client = get_llm_client()
+        observation_log: list[dict] = []
+        if not llm_client.is_enabled():
+            return self._run_planner_loop(state)
+
+        request = state.request
+        user_prompt = (
+            f"目的地: {request.destination}\n"
+            f"天数: {request.days}\n"
+            f"偏好: {request.preferences or '无'}\n"
+            f"必去景点: {request.must_visit_spots or '无'}\n"
+            f"不去景点: {request.avoid_spots or '无'}\n"
+            f"可选景点: {request.optional_spots or '无'}\n"
+            f"日期: {request.start_date or '未定'} ~ {request.end_date or '未定'}\n\n"
+            "请根据以上需求，调用合适的工具收集规划所需信息。"
+        )
+
+        def execute_tool(name: str, arguments: dict) -> dict:
+            observation = self._execute_tool_call(state, name, arguments)
+            observation_log.append(observation)
+            state.trace.append({"step": f"tool_{name}", **observation})
+            return observation
+
+        reply = llm_client.generate_with_tools(
+            system_prompt=PLAN_TOOL_COLLECTION_PROMPT,
+            user_prompt=user_prompt,
+            tools=build_openai_tools(),
+            execute_tool=execute_tool,
+        )
+        if reply is None and not observation_log:
+            # function calling 完全失败（无任何工具执行结果）时回退固定顺序
+            return self._run_planner_loop(state)
+
+        observation_log.append(
+            {
+                "step": "planner_next_action",
+                "status": "enough_to_plan",
+                "next_tool": "none",
+                "reason": reply or "已由 LLM 自主完成工具收集。",
+                "missing_information": [],
+            }
+        )
+        state.trace.append({"step": "planner_loop_finish", "reason": reply or "llm_tool_collection"})
+        return observation_log
+
+    def _execute_tool_call(self, state: PlanningContext, name: str, arguments: dict) -> dict:
+        """执行一次 function calling 工具调用，并把结果写回 state"""
+        request = state.request
+        if name == "weather_tool":
+            state.weather_result = self._run_weather(
+                request,
+                start_date=arguments.get("start_time"),
+                end_date=arguments.get("end_time"),
+            )
+            return {
+                "tool": "weather",
+                "days": len(state.weather_result.daily) if state.weather_result else 0,
+                "has_error": bool(state.weather_result.error) if state.weather_result else True,
+            }
+        if name == "attraction_tool":
+            state.attraction_result = attraction_tool.run(
+                AttractionInput(
+                    city=arguments.get("city") or request.destination,
+                    days=int(arguments.get("days") or request.days),
+                    must_visit_spots=list(arguments.get("must_visit_spots") or request.must_visit_spots or []),
+                    avoid_spots=list(arguments.get("avoid_spots") or request.avoid_spots or []),
+                    preferences=list(arguments.get("preferences") or request.preferences or []),
+                    target_count=arguments.get("target_count"),
+                    target_count_min=arguments.get("target_count_min"),
+                    target_count_max=arguments.get("target_count_max"),
+                )
+            )
+            return {
+                "tool": "attraction",
+                "candidate_count": len(state.attraction_result.candidates) if state.attraction_result else 0,
+                "must_visit_verified": len(state.attraction_result.must_visit_verified) if state.attraction_result else 0,
+            }
+        if name == "lodging_tool":
+            result = lodging_tool.run(
+                LodgingInput(
+                    destination=arguments.get("city") or request.destination,
+                    preferences=list(arguments.get("preferences") or request.preferences or []),
+                    avoid_keywords=list(arguments.get("avoid_keywords") or list(request.avoid_spots or []) + ["招待所"]),
+                    spots=list(arguments.get("spots") or []),
+                    top_n=int(arguments.get("top_n") or 5),
+                )
+            )
+            state.lodging_result = result
+            state.selected_lodging = result.candidates[0] if result.candidates else None
+            return {
+                "tool": "lodging",
+                "candidate_count": len(result.candidates),
+                "selected_lodging": state.selected_lodging.name if state.selected_lodging else None,
+            }
+        if name == "transport_tool":
+            return {
+                "tool": "transport",
+                "route_count": len(state.transport_results),
+                "status": "deferred_until_skeleton",
+            }
+        return {"tool": name, "status": "skipped"}
 
     def _fallback_next_action(self, collected_tools: list[str]) -> PlanningNextAction:
         if "attraction" not in collected_tools:
@@ -360,7 +475,15 @@ class PlanningAgent:
     def _fetch_targeted_transport(self, state: PlanningContext, request: TransportCheckRequest) -> None:
         routes = []
         for target in request.targets[:3]:
-            routes.append(transport_tool.run(city=state.request.destination, from_name=target.from_label, to_name=target.to_label))
+            routes.extend(
+                transport_tool.run(
+                    TransportInput(
+                        city=state.request.destination,
+                        from_name=target.from_label,
+                        to_name=target.to_label,
+                    )
+                )
+            )
         state.transport_results = routes
         state.trace.append(
             {
@@ -616,9 +739,10 @@ class PlanningAgent:
             }
         return {"tool": tool_name, "status": "skipped"}
 
-    def _run_weather(self, request: PlanningRequest):
-        start_date, end_date = self._resolve_dates(request)
-        return weather_tool.run(city=request.destination, start_time=start_date, end_time=end_date)
+    def _run_weather(self, request: PlanningRequest, start_date: str | None = None, end_date: str | None = None):
+        if not start_date or not end_date:
+            start_date, end_date = self._resolve_dates(request)
+        return weather_tool.run(WeatherInput(city=request.destination, start_time=start_date, end_time=end_date))
 
     def _run_attractions(self, request: PlanningRequest, refill: bool = False):
         return attraction_tool.run(
@@ -642,7 +766,6 @@ class PlanningAgent:
         return lodging_tool.run(
             LodgingInput(
                 destination=request.destination,
-                budget=request.budget,
                 preferences=preferences,
                 avoid_keywords=list(request.avoid_spots) + ["招待所"],
                 spots=spots,

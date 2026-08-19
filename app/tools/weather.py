@@ -3,58 +3,84 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Any
 
-import httpx
-
 from app.domain.common.dates import normalize_date
 from app.infrastructure.qweather_client import qweather_client
-from app.tools.schema.weather import WeatherDay, WeatherResult
+from app.tools.schema.weather import WeatherDay, WeatherInput, WeatherResult
+
+# weather_tool 的需求边界：给定城市 + 日期范围，返回逐日天气预报，供 LLM 约束户外/室内安排
 
 
 class WeatherTool:
+    """根据 Agent 提供的条件查询某城市某日期范围的逐日天气预报"""
+
     name = "weather_tool"
 
-    def run(self, *, city: str, start_time: str, end_time: str) -> WeatherResult:
+    def run(self, input_data: WeatherInput) -> WeatherResult:
+        city = input_data.city
+        start_time = input_data.start_time
+        end_time = input_data.end_time
         start_date = self._parse_date(start_time)
         end_date = self._parse_date(end_time)
         if start_date is None or end_date is None or start_date > end_date:
-            return WeatherResult(city=city, start_date=start_time, end_date=end_time, daily=[], source="qweather", error="日期范围无效")
+            return WeatherResult(city=city, start_date=start_time, end_date=end_time, daily=[], error="日期范围无效")
 
         if not qweather_client.is_enabled():
-            return WeatherResult(city=city, start_date=start_time, end_date=end_time, daily=[], source="qweather", error="和风天气未配置（QWEATHER_API_KEY / QWEATHER_GEO_API_KEY / QWEATHER_HOST）")
+            return WeatherResult(city=city, start_date=start_time, end_date=end_time, daily=[], error="和风天气未配置（QWEATHER_API_KEY / QWEATHER_GEO_API_KEY / QWEATHER_HOST）")
 
-        forecast = self._fetch_forecast(city, end_date=end_date)
+        forecast, fetch_error = self._fetch_forecast(city, start_date=start_date, end_date=end_date)
+        if fetch_error:
+            return WeatherResult(city=city, start_date=start_time, end_date=end_time, daily=[], error=fetch_error)
         if not forecast:
-            return WeatherResult(city=city, start_date=start_time, end_date=end_time, daily=[], source="qweather", error="未能获取天气数据")
+            return WeatherResult(city=city, start_date=start_time, end_date=end_time, daily=[], error="未能获取天气数据")
 
-        daily, covered = self._build_daily(forecast, start_date=start_date, end_date=end_date)
+        daily, covered, missing = self._build_daily(forecast, start_date=start_date, end_date=end_date)
         if not covered:
-            return WeatherResult(city=city, start_date=start_time, end_date=end_time, daily=daily, source="qweather", error="预报窗口未覆盖行程日期（和风仅支持未来 N 天预报，超出窗口的行程日无天气数据）")
+            return WeatherResult(
+                city=city,
+                start_date=start_time,
+                end_date=end_time,
+                daily=daily,
+                error=(
+                    "预报窗口未覆盖行程日期"
+                    f"（和风仅支持未来 {qweather_client.config.forecast_days} 天预报，"
+                    "超出窗口的行程日无天气数据）"
+                ),
+                missing_dates=missing,
+            )
 
         return WeatherResult(
             city=city,
             start_date=start_time,
             end_date=end_time,
             daily=daily,
-            source="qweather",
             coverage_start=covered[0],
             coverage_end=covered[-1],
+            missing_dates=missing,
         )
 
-    def _fetch_forecast(self, city: str, *, end_date: date) -> list[dict]:
-        """城市搜索 → location（LocationID 或经纬度） → 每日预报"""
+    def _fetch_forecast(self, city: str, *, start_date: date, end_date: date) -> tuple[list[dict], str | None]:
+        """城市搜索 → location（LocationID 或经纬度） → 每日预报
+
+        返回 (forecast, error)：error 区分城市解析失败与预报接口失败
+        """
+        geo = None
         try:
-            geo = self._search_city(city)
-            if not geo:
-                return []
-            location = geo.get("location_id") or self._format_location(geo.get("lng"), geo.get("lat"))
-            if not location:
-                return []
-            return qweather_client.get_daily_forecast(
+            geo = qweather_client.geo_lookup(city)
+        except Exception:
+            geo = None
+        if not geo:
+            return [], f"城市位置解析失败（{city}）"
+        location = geo.get("location_id") or self._format_location(geo.get("lng"), geo.get("lat"))
+        if not location:
+            return [], f"城市位置解析失败（{city}）：未返回有效坐标或 LocationID"
+        try:
+            forecast = qweather_client.get_daily_forecast(
                 location=location,
-                days=self._forecast_days_needed(end_date),
+                days=self._forecast_days_needed(start_date, end_date),
             )
         except Exception:
-            return []
+            return [], "天气预报接口调用失败"
+        return forecast, None
 
     def _format_location(self, lng: float | None, lat: float | None) -> str | None:
         """经纬度格式化为 "经度,纬度"（最多小数点后两位，满足和风 location 参数要求）"""
@@ -62,56 +88,28 @@ class WeatherTool:
             return None
         return f"{lng:.2f},{lat:.2f}"
 
-    def _forecast_days_needed(self, end_date: date) -> int:
-        """和风预报从今天起算：所需预报天数 = 行程结束日距今天的天数 + 1（端点上限由订阅配置约束）"""
-        return max((end_date - date.today()).days + 1, 1)
+    def _forecast_days_needed(self, start_date: date, end_date: date) -> int:
+        """所需预报天数（从今天到行程结束），至少覆盖整个行程窗口"""
+        trip_end_days = (end_date - date.today()).days + 1
+        trip_span_days = (end_date - start_date).days + 1
+        return max(trip_end_days, trip_span_days, 1)
 
-    def _search_city(self, city: str) -> dict[str, Any] | None:
-        """和风城市搜索（geo/v2/city/lookup）：只返回每天预报需要的字段
+    def _build_daily(self, forecast: list[dict], *, start_date: date, end_date: date) -> tuple[list[WeatherDay], list[str], list[str]]:
+        """按行程日期逐天对齐；缺失的天补空占位，保证 daily 与行程天数一一对应
 
-        输出：location_id（LocationID，优先用于预报）、lng/lat（经纬度备选）
-        """
-        host = qweather_client.config.host
-        api_key = qweather_client.config.geo_api_key
-        if not host or not api_key:
-            return None
-        try:
-            with httpx.Client(timeout=qweather_client.config.timeout_seconds) as client:
-                response = client.get(
-                    f"https://{host}/geo/v2/city/lookup",
-                    params={"location": city},
-                    headers={"X-QW-Api-Key": api_key},
-                )
-                response.raise_for_status()
-                data = response.json()
-        except Exception:
-            return None
-        if str(data.get("code")) != "200":
-            return None
-        locations = data.get("location") or []
-        if not locations:
-            return None
-        item = locations[0]
-        return {
-            "location_id": item.get("id"),
-            "lng": self._to_float(item.get("lon")),
-            "lat": self._to_float(item.get("lat")),
-        }
-
-    def _build_daily(self, forecast: list[dict], *, start_date: date, end_date: date) -> tuple[list[WeatherDay], list[str]]:
-        """按行程日期逐天对齐，真实预报日期匹配；缺失的天补空占位，保证 daily 与行程天数一一对应
-
-        返回 (daily, covered)：covered 为实际有预报数据的日期列表（按行程日期顺序）
+        返回 (daily, covered, missing)：covered 为有预报数据的日期，missing 为无预报数据的日期
         """
         by_date = {item.get("date"): item for item in forecast if item.get("date")}
         days = max((end_date - start_date).days + 1, 1)
         daily: list[WeatherDay] = []
         covered: list[str] = []
+        missing: list[str] = []
         for offset in range(days):
             current_date = start_date + timedelta(days=offset)
             item = by_date.get(str(current_date))
             if not item:
                 daily.append(WeatherDay(date=str(current_date)))
+                missing.append(str(current_date))
                 continue
             weather_day = str(item.get("weather_day") or "")
             humidity = str(item.get("humidity") or "").strip()
@@ -127,14 +125,17 @@ class WeatherTool:
                 )
             )
             covered.append(str(current_date))
-        return daily, covered
+        return daily, covered, missing
 
-    def _parse_date(self, value: str):
+    def _parse_date(self, value: str) -> date | None:
         """日期解析：复用项目统一归一化，兼容 YYYY-MM-DD / 2026/8/17 / 8月17日 等格式"""
         text = normalize_date(value)
         if not text:
             return None
-        return date.fromisoformat(text)
+        try:
+            return date.fromisoformat(text)
+        except ValueError:
+            return None
 
     def _to_float(self, value: Any) -> float | None:
         try:

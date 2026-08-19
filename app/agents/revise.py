@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
-from app.agents.prompt.revise import REVISE_BLOCK_PROMPT, REVISE_DAY_PROMPT, REVISE_GLOBAL_PROMPT, REVISION_INTENT_PROMPT
+from app.agents.prompt.revise import (
+    REVISE_BLOCK_PROMPT,
+    REVISE_DAY_PROMPT,
+    REVISE_GLOBAL_PROMPT,
+    REVISION_INTENT_PROMPT,
+    REVISE_TOOL_REFRESH_PROMPT,
+)
 from app.agents.reflection import planning_reflection
 from app.agents.repair import planning_repair
 from app.agents.schema.planning import PlanningRequest
@@ -21,8 +27,11 @@ from app.domain.common.itinerary import ItineraryDraftSchema
 from app.infrastructure.llm_client import get_llm_client
 from app.tools.attraction import attraction_tool
 from app.tools.lodging import lodging_tool
+from app.tools.registry import build_openai_tools
 from app.tools.schema.attraction import AttractionInput
 from app.tools.schema.lodging import LodgingInput
+from app.tools.schema.transport import TransportInput
+from app.tools.schema.weather import WeatherInput
 from app.tools.transport import transport_tool
 from app.tools.weather import weather_tool
 
@@ -582,6 +591,22 @@ class ReviseAgent:
             )
             return refreshed_context
 
+        llm_client = get_llm_client()
+        if llm_client.is_enabled():
+            refreshed = self._maybe_refresh_tools_with_llm(agent_input, intent, impact)
+            trace.append(
+                ReviseDebugTrace(
+                    step="revise_tool_refresh",
+                    status="ok" if any(refreshed.values()) else "no_data",
+                    payload={
+                        "required_tools": impact.required_tools,
+                        "available": [key for key, value in refreshed.items() if value is not None],
+                        "mode": "function_calling",
+                    },
+                )
+            )
+            return {**refreshed_context, **refreshed}
+
         if "weather" in impact.required_tools:
             refreshed_context["weather"] = self._refresh_weather(agent_input.request)
         if "attraction" in impact.required_tools:
@@ -598,14 +623,80 @@ class ReviseAgent:
                 payload={
                     "required_tools": impact.required_tools,
                     "available": [key for key, value in refreshed_context.items() if value is not None],
+                    "mode": "fixed_order",
                 },
             )
         )
         return refreshed_context
 
+    def _maybe_refresh_tools_with_llm(
+        self,
+        agent_input: ReviseAgentInput,
+        intent: RevisionIntent,
+        impact: RevisionImpactAnalysis,
+    ) -> dict:
+        """function calling 驱动的工具刷新：LLM 自主决定刷新哪些工具、传什么参数"""
+        refreshed_context: dict = {}
+        request = agent_input.request
+        user_prompt = (
+            f"修改请求: {intent.user_message}\n"
+            f"修改范围: {impact.scope}\n"
+            f"影响天数: {impact.affected_days or '未显式指定'}\n"
+            f"目的地: {request.destination}\n"
+            f"偏好: {request.preferences or '无'}\n"
+            f"必去景点: {request.must_visit_spots or '无'}\n"
+            f"不去景点: {request.avoid_spots or '无'}\n"
+            f"新增景点: {intent.added_spots or '无'}\n"
+            f"移除景点: {intent.removed_spots or '无'}\n"
+            f"锁定景点: {intent.locked_spots or '无'}\n"
+            f"意图提示需要刷新的工具: {impact.required_tools or '无'}\n\n"
+            "请根据以上修改意图，调用必要工具刷新信息。"
+        )
+
+        def execute_tool(name: str, arguments: dict) -> dict:
+            refreshed_context[name] = self._execute_refresh_tool_call(agent_input, intent, impact, name, arguments)
+            return {"name": name, "refreshed": refreshed_context[name] is not None}
+
+        llm_client = get_llm_client()
+        reply = llm_client.generate_with_tools(
+            system_prompt=REVISE_TOOL_REFRESH_PROMPT,
+            user_prompt=user_prompt,
+            tools=build_openai_tools(),
+            execute_tool=execute_tool,
+        )
+        if reply is None and not refreshed_context:
+            # function calling 失败且无任何刷新结果：回退固定顺序
+            refreshed_context = {}
+            for key, tool_name in (("weather", "weather_tool"), ("attraction", "attraction_tool"), ("lodging", "lodging_tool"), ("transport", "transport_tool")):
+                if key in impact.required_tools:
+                    refreshed_context[tool_name] = self._execute_refresh_tool_call(agent_input, intent, impact, tool_name, {})
+        return refreshed_context
+
+    def _execute_refresh_tool_call(
+        self,
+        agent_input: ReviseAgentInput,
+        intent: RevisionIntent,
+        impact: RevisionImpactAnalysis,
+        name: str,
+        arguments: dict,
+    ):
+        if name == "weather_tool":
+            start_date = arguments.get("start_time")
+            end_date = arguments.get("end_time")
+            if not start_date or not end_date:
+                start_date, end_date = self._resolve_dates(agent_input.request)
+            return weather_tool.run(WeatherInput(city=agent_input.request.destination, start_time=start_date, end_time=end_date))
+        if name == "attraction_tool":
+            return self._refresh_attractions(agent_input, intent)
+        if name == "lodging_tool":
+            return self._refresh_lodging(agent_input)
+        if name == "transport_tool":
+            return self._refresh_transport(agent_input, impact)
+        return None
+
     def _refresh_weather(self, request: PlanningRequest):
         start_date, end_date = self._resolve_dates(request)
-        return weather_tool.run(city=request.destination, start_time=start_date, end_time=end_date)
+        return weather_tool.run(WeatherInput(city=request.destination, start_time=start_date, end_time=end_date))
 
     def _refresh_attractions(self, agent_input: ReviseAgentInput, intent: RevisionIntent):
         existing = []
@@ -653,7 +744,6 @@ class ReviseAgent:
         return lodging_tool.run(
             LodgingInput(
                 destination=agent_input.request.destination,
-                budget=agent_input.request.budget,
                 preferences=preferences,
                 avoid_keywords=list(agent_input.request.avoid_spots) + ["招待所"],
                 spots=spots,
@@ -674,7 +764,15 @@ class ReviseAgent:
         for from_name, to_name in route_pairs[:3]:
             if not from_name or not to_name or from_name == to_name:
                 continue
-            routes.append(transport_tool.run(city=agent_input.request.destination, from_name=from_name, to_name=to_name))
+            routes.extend(
+                transport_tool.run(
+                    TransportInput(
+                        city=agent_input.request.destination,
+                        from_name=from_name,
+                        to_name=to_name,
+                    )
+                )
+            )
         return routes
 
     def _resolve_dates(self, request: PlanningRequest) -> tuple[str, str]:

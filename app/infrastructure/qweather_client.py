@@ -39,7 +39,32 @@ class QWeatherClient:
         self.config = config or QWeatherClientConfig.from_env()
 
     def is_enabled(self) -> bool:
-        return bool(self.config.api_key and self.config.host)
+        return bool(self.config.api_key and self.config.geo_api_key and self.config.host)
+
+    def geo_lookup(self, city: str) -> dict[str, Any] | None:
+        """和风城市搜索（geo/v2/city/lookup）"""
+        if not self.config.geo_api_key or not self.config.host:
+            return None
+        try:
+            url = f"https://{self.config.host}/geo/v2/city/lookup"
+            headers = {"X-QW-Api-Key": self.config.geo_api_key}
+            with httpx.Client(timeout=self.config.timeout_seconds) as client:
+                response = client.get(url, params={"location": city}, headers=headers)
+                response.raise_for_status()
+                data = response.json()
+        except Exception:
+            return None
+        if str(data.get("code")) != "200":
+            return None
+        locations = data.get("location") or []
+        if not locations:
+            return None
+        item = locations[0]
+        return {
+            "location_id": item.get("id"),
+            "lng": self._safe_int(item.get("lon")),
+            "lat": self._safe_int(item.get("lat")),
+        }
 
     def _get_json(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
         if not self.config.api_key or not self.config.host:
@@ -52,12 +77,7 @@ class QWeatherClient:
             return response.json()
 
     def get_daily_forecast(self, *, location: str, days: int) -> list[dict[str, Any]]:
-        """每日预报：按所需天数自动选择 /v7/weather/{days}d 端点
-
-        location 为 LocationID（如 101010100）或 "经度,纬度"（十进制，最多小数点后两位）；
-        days 指"需要覆盖到今天起的第 N 天"，client 自动向上取整到
-        合法端点（3d/7d/10d/15d/30d），且不超过订阅上限 QWEATHER_FORECAST_DAYS
-        """
+        """每日预报：按所需天数自动选择 /v7/weather/{days}d 端点"""
         endpoint = self._pick_endpoint(days)
         data = self._get_json(
             f"/v7/weather/{endpoint}",

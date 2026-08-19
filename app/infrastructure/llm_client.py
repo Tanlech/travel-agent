@@ -201,6 +201,99 @@ class LLMClient:
         self.last_debug_info = {"status": "success"}
         return content.strip()
 
+    # OpenAI function calling：LLM 自主决定调用哪些工具、传什么参数
+    # 多轮循环：LLM 返回 tool_calls → 逐条执行（dispatch_tool_call）→ 结果回填 → 继续对话
+    # 直到 LLM 不再请求工具（返回最终内容）或达到 max_rounds 上限
+    def generate_with_tools(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        tools: list[dict] | None = None,
+        tool_choice: str | dict | None = "auto",
+        max_rounds: int = 6,
+        execute_tool=None,
+    ) -> str | None:
+        if not self.is_enabled():
+            self.last_debug_info = {"status": "disabled"}
+            return None
+
+        messages: list[dict] = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        tool_trace: list[dict] = []
+        try:
+            for _round in range(max_rounds):
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    temperature=self.temperature,
+                    messages=messages,
+                    tools=tools or [],
+                    tool_choice=tool_choice if tools else None,
+                )
+                message = response.choices[0].message if response.choices else None
+                if message is None:
+                    self.last_debug_info = {"status": "empty_response", "tool_trace": tool_trace}
+                    return None
+
+                tool_calls = getattr(message, "tool_calls", None)
+                if not tool_calls:
+                    content = message.content or ""
+                    if not content.strip():
+                        self.last_debug_info = {"status": "empty_response", "tool_trace": tool_trace}
+                        return None
+                    self.last_debug_info = {"status": "success", "rounds": _round + 1, "tool_trace": tool_trace}
+                    return content.strip()
+
+                # 记录本轮 assistant 消息（含 tool_calls），随后逐条执行
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": message.content or "",
+                        "tool_calls": [
+                            {
+                                "id": call.id,
+                                "type": "function",
+                                "function": {"name": call.function.name, "arguments": call.function.arguments},
+                            }
+                            for call in tool_calls
+                        ],
+                    }
+                )
+                for call in tool_calls:
+                    call_id = call.id
+                    fn_name = call.function.name
+                    arguments = self._parse_tool_arguments(call.function.arguments)
+                    result = execute_tool(fn_name, arguments) if execute_tool else {"error": "no executor"}
+                    tool_trace.append({"call_id": call_id, "name": fn_name, "arguments": arguments})
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "content": json.dumps(result, ensure_ascii=False),
+                        }
+                    )
+        except Exception as exc:
+            self.last_debug_info = {
+                "status": "api_error",
+                "reason": f"{type(exc).__name__}: {exc}",
+                "tool_trace": tool_trace,
+            }
+            return None
+        self.last_debug_info = {"status": "max_rounds_exceeded", "tool_trace": tool_trace}
+        return None
+
+    @staticmethod
+    def _parse_tool_arguments(raw: str | None) -> dict:
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+
     def _generate_structured(
         self,
         *,

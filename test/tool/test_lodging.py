@@ -34,20 +34,22 @@ def _poi(
     *,
     lng: float | None = 116.1,
     lat: float | None = 39.9,
-    price: str | None = "500",
     address: str | None = "测试路 1 号",
     poi_type: str = "住宿服务;宾馆酒店;四星级宾馆",
+    rating: str | None = "4.5",
+    keytag: str | None = "四星级酒店",
 ) -> dict:
     return {
         "poi_id": poi_id,
         "name": name,
         "lng": lng,
         "lat": lat,
-        "price": price,
         "address": address,
         "type": poi_type,
         "business_area": "中心城区",
         "tel": "010-12345678",
+        "rating": rating,
+        "keytag": keytag,
     }
 
 
@@ -66,30 +68,33 @@ def test_output_contains_only_candidate_basic_fields(monkeypatch):
 
     result = LodgingTool().run(LodgingInput(destination="测试市"))
 
-    assert result.model_dump().keys() == {"city", "candidates", "summary"}
+    assert result.model_dump().keys() == {"city", "candidates", "summary", "debug"}
+    assert result.debug is not None
+    assert result.debug["raw_candidate_count"] == 1
+    assert result.debug["query_count"] >= 1
     assert result.candidates[0].model_dump().keys() == {
-        "poi_id", "name", "area", "price", "address", "tel",
+        "poi_id", "name", "area", "address", "tel", "rating", "keytag", "distance_to_spots_km",
     }
 
 
-def test_ranks_by_budget_and_multi_spot_location(monkeypatch):
+def test_ranks_by_multi_spot_location(monkeypatch):
     coords = {
         "景点甲": {"lng": 116.0, "lat": 39.0},
         "景点乙": {"lng": 116.2, "lat": 39.0},
     }
     pois = [
-        _poi("central", "中心酒店", lng=116.1, lat=39.0, price="550"),
-        _poi("far", "远郊酒店", lng=116.6, lat=39.0, price="400"),
-        _poi("expensive", "昂贵酒店", lng=116.1, lat=39.0, price="1500"),
+        _poi("central", "中心酒店", lng=116.1, lat=39.0, rating="4.8", keytag="四星级酒店"),
+        _poi("far", "远郊酒店", lng=116.6, lat=39.0, rating="4.2", keytag="四星级酒店"),
+        _poi("expensive", "昂贵酒店", lng=116.1, lat=39.0, rating="4.8", keytag="四星级酒店"),
     ]
     _mock_amap(monkeypatch, pois, coords)
 
     result = LodgingTool().run(
-        LodgingInput(destination="测试市", budget=600, spots=["景点甲", "景点乙"])
+        LodgingInput(destination="测试市", spots=["景点甲", "景点乙"])
     )
 
-    assert [item.name for item in result.candidates] == ["中心酒店", "昂贵酒店", "远郊酒店"]
-    assert result.candidates[-1].name == "远郊酒店"
+    assert result.candidates[-1].name == "远郊酒店"  # 距景点最远，排最后
+    assert "中心酒店" in [item.name for item in result.candidates]
 
 
 def test_filters_non_lodging_and_avoid_keywords(monkeypatch):
@@ -165,7 +170,6 @@ def _run_integration_case(title: str, **kwargs) -> None:
     print(f"\n========== {title} ==========")
     print(
         f"输入: 目的地={lodging_input.destination} "
-        f"每晚预算={lodging_input.budget or '不限'} "
         f"偏好={lodging_input.preferences or '无'} "
         f"规避={lodging_input.avoid_keywords or '无'} "
         f"景点={lodging_input.spots or '无'}"
@@ -174,22 +178,27 @@ def _run_integration_case(title: str, **kwargs) -> None:
     for index, candidate in enumerate(result.candidates, 1):
         print(
             f"  {index}. {candidate.name} [{candidate.area or '区域未知'}] "
-            f"参考价={candidate.price or '未知'}"
+            f"评分={candidate.rating or '未知'} 档次={candidate.keytag or '未知'}"
         )
         if candidate.address:
             print(f"     地址: {candidate.address}")
         if candidate.tel:
             print(f"     电话: {candidate.tel}")
     print(f"摘要: {result.summary}")
+    if result.debug:
+        print(
+            f"统计: 查询{result.debug['query_count']}条 → 原始{result.debug['raw_candidate_count']}家 "
+            f"→ 过滤后{result.debug['filtered_candidate_count']}家 "
+            f"(无评分{result.debug['no_rating_count']} 无档次{result.debug['no_keytag_count']})"
+        )
     assert result.candidates, "候选为空"
 
 
 @pytest.mark.integration
 def test_lodging_beijing_high_end():
     _run_integration_case(
-        "北京 高预算 五星/亲子 故宫+颐和园",
+        "北京 五星/亲子 故宫+颐和园",
         destination="北京",
-        budget=1500,
         preferences=["五星", "亲子"],
         avoid_keywords=["招待所"],
         spots=["故宫", "颐和园"],
@@ -197,11 +206,10 @@ def test_lodging_beijing_high_end():
 
 
 @pytest.mark.integration
-def test_lodging_guangzhou_budget():
+def test_lodging_guangzhou_multi_spot():
     _run_integration_case(
-        "广州 经济型 多景点",
+        "广州 多景点",
         destination="广州",
-        budget=300,
         spots=["广州塔", "北京路", "白云山", "圣心大教堂"],
     )
 
@@ -211,7 +219,6 @@ def test_lodging_chengdu_grade():
     _run_integration_case(
         "成都 四星 熊猫基地",
         destination="成都",
-        budget=600,
         preferences=["四星"],
         spots=["成都大熊猫繁育研究基地"],
         avoid_keywords=["酒吧"],
@@ -225,6 +232,21 @@ def test_lodging_default():
         destination="杭州",
         spots=["西湖"],
     )
+
+
+@pytest.mark.integration
+def test_lodging_manual():
+    """手动测试：直接修改下方输入，运行查看输出结果"""
+    # ===== 输入（在这里修改）=====
+    _run_integration_case(
+        "广州 四星 广州塔+北京路",
+        destination="广州",
+        preferences=["四星"],
+        avoid_keywords=["招待所"],
+        spots=["广州塔", "北京路"],
+        top_n=5,
+    )
+    # ============================
 
 
 @pytest.mark.integration

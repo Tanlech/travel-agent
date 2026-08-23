@@ -4,14 +4,10 @@ from pydantic import BaseModel, Field, field_validator
 
 
 class AttractionCandidate(BaseModel):
-    poi_id: str | None = None
     name: str
     area: str | None = None
-    source: str | None = None
     estimated_visit_duration_hours: float | None = None
     reason: str | None = None
-    entity_level: str | None = None
-    tags: list[str] = Field(default_factory=list)
 
 
 class AttractionInput(BaseModel):
@@ -55,5 +51,18 @@ class AttractionResult(BaseModel):
     candidates: list[AttractionCandidate] = Field(default_factory=list)
     must_visit_verified: list[AttractionCandidate] = Field(default_factory=list)
     avoid_verified: list[AttractionCandidate] = Field(default_factory=list)
-    source: str | None = None
+    error: str | None = None
     raw: dict | None = None
+
+
+class SpotKbEntry(BaseModel):
+    """LLM 一次判断：是否为主要景点 + 生成待沉淀的知识库条目（reason/tags/duration）"""
+    is_major: bool = False
+    reason: str = ""
+    tags: list[str] = Field(default_factory=list)
+    estimated_visit_duration_hours: float | None = None
+
+
+class SpotSelection(BaseModel):
+    """LLM 从候选池中选出的、最值得纳入本次行程的景点名称列表"""
+    names: list[str] = Field(default_factory=list)

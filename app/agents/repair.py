@@ -115,7 +115,7 @@ class PlanningRepair:
 
     def _refresh_candidates(self, state: PlanningContext) -> None:
         request = state.request
-        existing = [item for item in (state.attraction_result.candidates if state.attraction_result else []) if item.entity_level != "sub"]
+        existing = list(state.attraction_result.candidates if state.attraction_result else [])
         existing_names = [item.name for item in existing]
         attraction_result = attraction_tool.run(
             AttractionInput(
@@ -132,8 +132,6 @@ class PlanningRepair:
         if attraction_result.candidates and state.attraction_result:
             merged = list(existing)
             for candidate in attraction_result.candidates:
-                if candidate.entity_level == "sub":
-                    continue
                 if candidate.name not in existing_names:
                     merged.append(candidate)
                     existing_names.append(candidate.name)
@@ -148,7 +146,6 @@ class PlanningRepair:
     def _apply_repair_result(self, state: PlanningContext, result: RepairResult, repair_tasks: list[RepairTask]) -> PlanningContext:
         candidates = list(state.attraction_result.candidates if state.attraction_result else [])
         candidate_by_index = {idx: candidate for idx, candidate in enumerate(candidates)}
-        candidate_by_poi_id = {candidate.poi_id: candidate for candidate in candidates if candidate.poi_id}
         candidate_by_name = {candidate.name: candidate for candidate in candidates}
 
         day_map = {day.day_index: day for day in state.draft.day_plans}
@@ -161,8 +158,6 @@ class PlanningRepair:
                 if spot_ref.candidate_index is not None:
                     matched_candidate = candidate_by_index.get(spot_ref.candidate_index)
                 if matched_candidate is None and spot_ref.poi_id:
-                    matched_candidate = candidate_by_poi_id.get(spot_ref.poi_id)
-                if matched_candidate is None and spot_ref.poi_id:
                     matched_candidate = candidate_by_name.get(spot_ref.poi_id)
                 if matched_candidate is not None:
                     resolved_candidates.append(matched_candidate)
@@ -170,7 +165,6 @@ class PlanningRepair:
                     fallback_title = spot_ref.poi_id or (f"候选点#{spot_ref.candidate_index}" if spot_ref.candidate_index is not None else "候选景点")
                     resolved_candidates.append(
                         AttractionCandidate(
-                            poi_id=spot_ref.poi_id,
                             name=fallback_title,
                             area=repaired_day.primary_area,
                             estimated_visit_duration_hours=2.0,

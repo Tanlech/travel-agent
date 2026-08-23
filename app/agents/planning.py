@@ -759,9 +759,7 @@ class PlanningAgent:
 
     def _run_lodging(self, request: PlanningRequest, state: PlanningContext):
         candidates = state.attraction_result.candidates if state.attraction_result else []
-        core_spots = [item.name for item in candidates if item.entity_level == "main"][:4]
-        support_spots = [item.name for item in candidates if item.entity_level != "main"][:2]
-        spots = core_spots + [item for item in support_spots if item not in core_spots]
+        spots = [item.name for item in candidates][:6]
         preferences = list(request.preferences) + ["优先标准酒店", "适合作为全程锚点"]
         return lodging_tool.run(
             LodgingInput(

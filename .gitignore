@@ -21,3 +21,4 @@ envs/
 
 # 数据
 *.db
+data/

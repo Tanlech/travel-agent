@@ -132,16 +132,7 @@ class PlanningReflection:
         return issues
 
     def _check_sub_spots(self, state: PlanningContext) -> list[ReflectionIssue]:
-        if state.attraction_result and any(item.entity_level == "sub" for item in state.attraction_result.candidates[: max(len(state.attraction_result.candidates), 1)]):
-            return [
-                ReflectionIssue(
-                    code="sub_spot_present",
-                    message="结果中仍含部分从属景点，建议替换为主景点或独立景点。",
-                    severity="warning",
-                    scope="attraction",
-                    fix_hint="action=replace_sub_spots; target=all_days; 优先替换从属景点，保留主景区或独立景点。",
-                )
-            ]
+        # 已移除主/从属（entity_level）字段，不再产生从属景点告警
         return []
 
     def _check_day_area_consistency(self, state: PlanningContext) -> list[ReflectionIssue]:

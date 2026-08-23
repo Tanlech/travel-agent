@@ -4,6 +4,7 @@ from datetime import date, timedelta
 from typing import Any
 
 from app.domain.common.dates import normalize_date
+from app.infrastructure.conversions import safe_float
 from app.infrastructure.qweather_client import qweather_client
 from app.tools.schema.weather import WeatherDay, WeatherInput, WeatherResult
 
@@ -117,7 +118,7 @@ class WeatherTool:
             daily.append(
                 WeatherDay(
                     date=str(current_date),
-                    temperature_range=self._build_temp_range(self._to_float(item.get("temp_min")), self._to_float(item.get("temp_max"))),
+                    temperature_range=self._build_temp_range(safe_float(item.get("temp_min")), safe_float(item.get("temp_max"))),
                     weather_day=weather_day,
                     wind=self._build_wind(item.get("wind_dir_day"), item.get("wind_scale_day")),
                     humidity=f"{humidity}%" if humidity else None,
@@ -135,12 +136,6 @@ class WeatherTool:
         try:
             return date.fromisoformat(text)
         except ValueError:
-            return None
-
-    def _to_float(self, value: Any) -> float | None:
-        try:
-            return float(value)
-        except Exception:
             return None
 
     def _build_temp_range(self, temp_min: float | None, temp_max: float | None) -> str | None:

@@ -1,20 +1,40 @@
 from __future__ import annotations
 
 import hashlib
-from typing import Any
+import logging
 
 from app.infrastructure.llm_client import get_llm_client
-from app.knowledge.embedder import TextEmbedder, text_embedder
-from app.knowledge.embedder_sparse import SparseTextEmbedder, sparse_text_embedder
-from app.knowledge.loader import chunks_from_entries, load_text_files
-from app.knowledge.retriever import retrieve
+from app.knowledge.embedder import (
+    SparseTextEmbedder,
+    TextEmbedder,
+    sparse_text_embedder,
+    text_embedder,
+)
+from app.knowledge.ingest.qa import load_qa_documents
+from app.knowledge.retriever import embed_cached, retrieve
 from app.knowledge.schemas import RetrievalItem, RetrievalResult, TextChunk
 from app.knowledge.store import QdrantStore, qdrant_store
+
+logger = logging.getLogger(__name__)
 
 _ASK_SYSTEM_PROMPT = (
     "你是旅行规划助手。请基于提供的参考资料回答用户问题，"
     "引用时说明来源；资料中没有的信息，如实说明不知道，不要编造。"
 )
+
+
+def chunks_from_entries(entries: list[dict], text_key: str = "text", metadata_keys: tuple[str, ...] = ()) -> list[TextChunk]:
+    """把结构化条目（如景点清单、FAQ）转成知识块：text 为正文，其余字段作为 metadata
+    条目可携带稳定 id（entry["id"]），用于重复入库时覆盖而非追加"""
+    chunks: list[TextChunk] = []
+    for entry in entries or []:
+        text = str(entry.get(text_key) or "").strip()
+        if not text:
+            continue
+        metadata = {k: str(entry[k]) for k in metadata_keys if entry.get(k) is not None}
+        chunk_id = str(entry["id"]).strip() if entry.get("id") else None
+        chunks.append(TextChunk(text=text, metadata=metadata, id=chunk_id))
+    return chunks
 
 
 class KnowledgeService:
@@ -44,14 +64,15 @@ class KnowledgeService:
     # ---------- 入库 ----------
 
     def ingest_chunks(self, collection: str, chunks: list[TextChunk]) -> int:
-        """向量化并写入知识块，返回实际写入数量。同内容重复入库自动覆盖（幂等）。
-        Qdrant 后端自动附带稀疏向量（BM25），开启混合检索。"""
+        """向量化并写入知识块，返回实际写入数量。同内容重复入库自动覆盖（幂等）
+        Qdrant 后端自动附带稀疏向量（BM25），开启混合检索"""
         chunks = [c for c in chunks or [] if (c.text or "").strip()]
         if not chunks or not self.embedder.is_enabled():
             return 0
         texts = [c.text for c in chunks]
         embeddings = self.embedder.embed_texts(texts)
         if not embeddings:
+            logger.warning("ingest_chunks 向量化失败/为空，跳过写入: collection=%s chunks=%d", collection, len(chunks))
             return 0
         ids = [c.id or self._chunk_id(collection, c) for c in chunks]
         metadatas = [c.metadata for c in chunks]
@@ -60,8 +81,31 @@ class KnowledgeService:
         return len(chunks)
 
     def ingest_documents(self, collection: str, paths: list[str]) -> int:
-        """加载文档（目录/文件，支持 md/txt/rst）并入库"""
-        return self.ingest_chunks(collection, load_text_files(paths))
+        """加载文档并入库；按 source 先清旧点再重导，避免文档删除/改动后残留脏向量"""
+        return self.reingest_by_source(collection, load_qa_documents(paths), source_key="source")
+
+    def reingest_by_source(self, collection: str, chunks: list[TextChunk], source_key: str = "source") -> int:
+        """按来源重建：先清该来源旧点再重导，返回实际写入数量
+        不携带 source_key 的块按增量追加（不清空共享集合），避免误删他人数据
+        """
+        chunks = [c for c in chunks or [] if (c.text or "").strip()]
+        if not chunks:
+            return 0
+        grouped: dict[str, list[TextChunk]] = {}
+        unsourced: list[TextChunk] = []
+        for c in chunks:
+            src = str((c.metadata or {}).get(source_key) or "").strip()
+            if src:
+                grouped.setdefault(src, []).append(c)
+            else:
+                unsourced.append(c)
+        total = 0
+        for src, group in grouped.items():
+            self.clear(collection, where={source_key: src})
+            total += self.ingest_chunks(collection, group)
+        if unsourced:
+            total += self.ingest_chunks(collection, unsourced)
+        return total
 
     def ingest_entries(
         self,
@@ -76,7 +120,9 @@ class KnowledgeService:
     # ---------- 检索 ----------
 
     def retrieve(self, collection: str, query: str, top_k: int = 5, where: dict | None = None) -> RetrievalResult:
-        query_sparse = self.sparse_embedder.embed_text(query) if self._hybrid_enabled else None
+        if not query or not query.strip():
+            return RetrievalResult(collection=collection, query=query, items=[])
+        query_sparse = embed_cached(self.sparse_embedder, query, "sparse") if self._hybrid_enabled else None
         return retrieve(self.store, self.embedder, collection, query, top_k=top_k, where=where, query_sparse=query_sparse)
 
     def get_all(self, collection: str, where: dict | None = None) -> list[RetrievalItem]:
@@ -92,13 +138,20 @@ class KnowledgeService:
         where: dict | None = None,
         system_prompt: str | None = None,
     ) -> str | None:
-        """检索相关知识块，连同问题交给 LLM 生成回答；LLM 不可用时返回 None"""
+        """检索相关知识块，连同问题交给 LLM 生成回答；LLM 不可用时返回 None
+
+        返回 None 说明"无命中或 LLM 不可用"，二者差异通过日志区分（便于排障与降级策略）
+        """
         result = self.retrieve(collection, question, top_k=top_k, where=where)
         if not result.items:
+            logger.info("ask 未命中知识库: collection=%s question=%r", collection, question)
             return None
-        context = "\n\n".join(f"[{i + 1}] {item.text}" for i, item in enumerate(result.items))
+        context = "\n\n".join(
+            self._format_context_item(i, item) for i, item in enumerate(result.items)
+        )
         llm = get_llm_client()
         if not llm.is_enabled():
+            logger.warning("ask LLM 不可用，仅检索未生成: collection=%s", collection)
             return None
         return llm.generate_chat_reply(
             system_prompt=system_prompt or _ASK_SYSTEM_PROMPT,
@@ -114,8 +167,20 @@ class KnowledgeService:
         self.store.delete(collection, where=where)
 
     @staticmethod
+    def _format_context_item(index: int, item: RetrievalItem) -> str:
+        """拼装送给 LLM 的上下文条目；块带章节/来源时展示归属（可溯源）"""
+        meta = item.metadata or {}
+        parts = [p for p in (meta.get("section"), meta.get("source")) if p]
+        prefix = f"（{'｜'.join(parts)}）" if parts else ""
+        return f"[{index + 1}] {prefix}{item.text}"
+
+    @staticmethod
     def _chunk_id(collection: str, chunk: TextChunk) -> str:
-        digest = hashlib.md5((chunk.text or "").encode("utf-8")).hexdigest()
+        """正文或元数据不同则生成不同 id，避免同文不同源的块在重复入库时互相覆盖"""
+        meta = chunk.metadata or {}
+        pieces = "\x00".join(f"{k}\x01{v}" for k, v in sorted(meta.items()))
+        anchor = f"{chunk.text or ''}\x02{pieces}"
+        digest = hashlib.sha256(anchor.encode("utf-8")).hexdigest()
         return f"{collection}:{digest}"
 
 

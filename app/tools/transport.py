@@ -120,18 +120,18 @@ class TransportTool:
         if not walk:
             return None
         return WalkRoute(
-            distance_meters=self._safe_int(walk.get("distance_meters")),
-            duration_minutes=self._seconds_to_minutes(self._safe_int(walk.get("duration_seconds"))),
+            distance_meters=safe_int(walk.get("distance_meters")),
+            duration_minutes=self._seconds_to_minutes(safe_int(walk.get("duration_seconds"))),
         )
 
     def _build_taxi_route(self, taxi: dict | None) -> TaxiRoute | None:
         if not taxi:
             return None
-        distance_meters = self._safe_int(taxi.get("distance_meters"))
+        distance_meters = safe_int(taxi.get("distance_meters"))
         return TaxiRoute(
-            cost=self._safe_float(taxi.get("cost")) or self._estimate_taxi_cost(distance_meters),
+            cost=safe_float(taxi.get("cost")) or self._estimate_taxi_cost(distance_meters),
             distance_meters=distance_meters,
-            duration_minutes=self._seconds_to_minutes(self._safe_int(taxi.get("duration_seconds"))),
+            duration_minutes=self._seconds_to_minutes(safe_int(taxi.get("duration_seconds"))),
         )
 
     def _build_transit_route(self, transit: dict | None) -> TransitOptionSummary | None:
@@ -166,10 +166,10 @@ class TransportTool:
 
         steps = self._build_transit_steps(transit_option.get("segments") or [])
         return TransitOptionSummary(
-            cost=self._safe_float(transit_option.get("cost")),
-            duration_minutes=self._seconds_to_minutes(self._safe_int(transit_option.get("duration"))),
-            distance_meters=self._safe_int(transit_option.get("distance")),
-            walking_distance_meters=self._safe_int(transit_option.get("walking_distance")),
+            cost=safe_float(transit_option.get("cost")),
+            duration_minutes=self._seconds_to_minutes(safe_int(transit_option.get("duration"))),
+            distance_meters=safe_int(transit_option.get("distance")),
+            walking_distance_meters=safe_int(transit_option.get("walking_distance")),
             transfer_count=self._count_transit_rides(steps),
             steps=steps,
         )
@@ -199,8 +199,8 @@ class TransportTool:
             return None
         return TransitRouteStep(
             mode="walk",
-            distance_meters=self._safe_int(walking.get("distance")),
-            duration_minutes=self._seconds_to_minutes(self._safe_int(walking.get("duration"))),
+            distance_meters=safe_int(walking.get("distance")),
+            duration_minutes=self._seconds_to_minutes(safe_int(walking.get("duration"))),
         )
 
     def _summarize_transit_leg(self, segment: dict) -> TransitRouteStep | None:
@@ -213,8 +213,8 @@ class TransportTool:
         return TransitRouteStep(
             mode=self._normalize_transit_mode(busline.get("type")),
             name=busline.get("name"),
-            distance_meters=self._safe_int(busline.get("distance")),
-            duration_minutes=self._seconds_to_minutes(self._safe_int(busline.get("duration"))),
+            distance_meters=safe_int(busline.get("distance")),
+            duration_minutes=self._seconds_to_minutes(safe_int(busline.get("duration"))),
             from_station=departure.get("name"),
             to_station=arrival.get("name"),
         )
@@ -269,12 +269,6 @@ class TransportTool:
             return "bus"
         return "bus" if value else None
 
-    def _safe_int(self, value) -> int | None:
-        try:
-            return int(float(value)) if value is not None else None
-        except Exception:
-            return None
-
     def _seconds_to_minutes(self, seconds: int | None) -> int | None:
         if seconds is None:
             return None
@@ -288,12 +282,6 @@ class TransportTool:
         if distance_meters is None:
             return None
         return round(max(10.0, 14.0 + distance_meters / 1000.0 * 2.8), 1)
-
-    def _safe_float(self, value) -> float | None:
-        try:
-            return float(value) if value is not None else None
-        except Exception:
-            return None
 
 
 transport_tool = TransportTool()

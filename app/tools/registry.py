@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from pydantic import BaseModel
+
 from app.tools.attraction import attraction_tool
 from app.tools.lodging import lodging_tool
 from app.tools.schema.attraction import AttractionInput
@@ -31,11 +33,20 @@ def _schema_of(model: type) -> dict[str, Any]:
     return schema
 
 
+def _dump(value: Any) -> Any:
+    """把 Pydantic 模型（或模型列表）转可序列化结构，其余原样返回"""
+    if isinstance(value, BaseModel):
+        return value.model_dump()
+    if isinstance(value, list):
+        return [item.model_dump() if isinstance(item, BaseModel) else item for item in value]
+    return value
+
+
 def _execute(model: type, run: Callable[..., Any], args: dict[str, Any]) -> dict[str, Any]:
     """校验并执行工具，返回可序列化结果"""
     parsed = model(**args)
     result = run(parsed)
-    return result.model_dump() if hasattr(result, "model_dump") else result
+    return _dump(result)
 
 
 TOOL_DEFINITIONS: list[dict[str, Any]] = [

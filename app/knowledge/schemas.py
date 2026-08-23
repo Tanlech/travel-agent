@@ -1,6 +1,17 @@
 from __future__ import annotations
 
+from typing import TypedDict
+
 from pydantic import BaseModel, Field
+
+
+class SparseVector(TypedDict):
+    """Qdrant 稀疏向量参数结构：{"indices": [...], "values": [...]}
+
+    属数据结构契约，放在契约层，供 embedder 定义、store/retriever 消费共用
+    """
+    indices: list[int]
+    values: list[float]
 
 
 class TextChunk(BaseModel):
@@ -17,7 +28,7 @@ class RetrievalItem(BaseModel):
     id: str
     text: str
     metadata: dict[str, str] = Field(default_factory=dict)
-    distance: float | None = None  # 余弦距离，越小越相似
+    distance: float | None = None  # 相似度分数：混合路为 RRF 融合分（越大越相关，非原始余弦）
 
 
 class RetrievalResult(BaseModel):

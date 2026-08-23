@@ -1,3 +1,5 @@
+"""记忆存取：协议 + 内存实现 + Redis 实现（键 mem:user:{id} / mem:trip:{id}）"""
+
 from __future__ import annotations
 
 import logging
@@ -6,8 +8,6 @@ from typing import Any, Protocol
 from app.domain.memory.schema import TripMemory, UserMemory
 from app.infrastructure.settings import settings
 from app.infrastructure.redis_client import get_redis
-
-"""记忆存取：协议 + 内存实现 + Redis 实现（键 mem:user:{id} / mem:trip:{id}）"""
 
 logger = logging.getLogger(__name__)
 

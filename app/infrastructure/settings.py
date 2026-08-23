@@ -31,9 +31,14 @@ class Settings(BaseSettings):
     embedding_model: str = "qwen3.7-text-embedding"  # 阿里云 Qwen-Embedding（1024 维），可切换 text-embedding-v3/v4
     embedding_dim: int = 1024
     embedding_batch_size: int = 16
+    # 嵌入输入容量：文档 chunk 按此换算封顶，保证不超出 embedding 模型 token 上限（A 步）
+    embedding_max_tokens: int = 2560  # embedding 接口允许的最大输入 token 数
+    embedding_token_per_char: float = 1.0  # 每字符折算 token 数（中文保守取 1.0，保证不超限）
     qdrant_url: str | None = None  # 如 http://localhost:6333
     qdrant_api_key: str | None = None
     qdrant_collection_prefix: str = "kb_"  # Qdrant 集合名前缀，避免与其他应用冲突
+    retrieval_prefetch_multiplier: int = 2  # 混合检索 RRF 融合前各路的召回放大系数（越大召回越全，开销越高）
+    retrieval_max_top_k: int = 20  # 检索 top_k 上限保护，防止外部传超大值放大召回开销
 
     llm_provider: str = "mock"
     openai_api_key: str | None = None

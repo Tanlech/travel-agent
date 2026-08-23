@@ -7,6 +7,7 @@ from app.agents.schema.repair import RepairResult
 from app.agents.sparse.repair import build_repair_user_prompt
 from app.domain.context.planning import PlanningContext
 from app.domain.common.itinerary import ItineraryDayPlan, ItineraryDraftSchema, ItineraryTimeBlockSchema
+from app.infrastructure.conversions import safe_int
 from app.infrastructure.llm_client import get_llm_client
 from app.tools.attraction import attraction_tool
 from app.tools.schema.attraction import AttractionCandidate, AttractionInput
@@ -52,7 +53,7 @@ class PlanningRepair:
             task = RepairTask(problem_type=issue.code)
             fix_hint = issue.fix_hint or ""
             parsed = self._parse_fix_hint(fix_hint)
-            task.day_index = self._safe_int(parsed.get("day_index"))
+            task.day_index = safe_int(parsed.get("day_index"))
             task.action = parsed.get("action", self._default_action_for_issue(issue.code))
             task.preferred_area = parsed.get("preferred_area")
             task.must_keep_titles = self._split_csv(parsed.get("must_keep"))
@@ -69,14 +70,6 @@ class PlanningRepair:
             key, value = part.split("=", 1)
             parsed[key.strip()] = value.strip()
         return parsed
-
-    def _safe_int(self, value: str | None) -> int | None:
-        if value is None:
-            return None
-        try:
-            return int(value)
-        except ValueError:
-            return None
 
     def _split_csv(self, value: str | None) -> list[str]:
         if not value:

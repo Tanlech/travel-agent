@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.infrastructure.amap_client import amap_client
+from app.infrastructure.conversions import safe_float
 from app.infrastructure.settings import settings
 from app.knowledge import ATTRACTION_COLLECTION, knowledge_service
 from app.tools.prompt.attraction import (
@@ -74,7 +75,7 @@ class AttractionTool:
                 AttractionCandidate(
                     name=name,
                     area=area,
-                    estimated_visit_duration_hours=self._safe_float(meta.get("duration")),
+                    estimated_visit_duration_hours=safe_float(meta.get("duration")),
                     reason=str(meta.get("reason") or "").strip() or self._fallback_reason(name, area),
                 )
             )
@@ -226,7 +227,7 @@ class AttractionTool:
         if not entry["is_major"]:
             return
         try:
-            from app.knowledge.attraction_persist import add_spot
+            from app.knowledge.ingest.attraction import add_spot
 
             add_spot(
                 city,
@@ -377,13 +378,6 @@ class AttractionTool:
         na = AttractionTool._normalize_name(a)
         nb = AttractionTool._normalize_name(b)
         return bool(na and nb and (na in nb or nb in na))
-
-    @staticmethod
-    def _safe_float(value: object) -> float | None:
-        try:
-            return float(value)
-        except Exception:
-            return None
 
     @staticmethod
     def _normalize_name(value: str) -> str:

@@ -5,6 +5,7 @@ from typing import Any
 
 import httpx
 
+from app.infrastructure.conversions import retry_call, safe_float, safe_int, safe_str
 from app.infrastructure.settings import settings
 
 
@@ -30,6 +31,7 @@ class AmapClient:
 
     def __init__(self, config: AmapClientConfig | None = None) -> None:
         self.config = config or AmapClientConfig.from_env()
+        self._client = httpx.Client(timeout=self.config.timeout_seconds)  # 复用连接，避免每次请求重新握手
 
     def is_enabled(self) -> bool:
         return bool(self.config.api_key)
@@ -41,10 +43,9 @@ class AmapClient:
         request_params = dict(params or {})
         request_params.setdefault("key", self.config.api_key)
         url = f"{self.config.base_url}{path}"
-        with httpx.Client(timeout=self.config.timeout_seconds) as client:
-            response = client.get(url, params=request_params)
-            response.raise_for_status()
-            return response.json()
+        response = retry_call(lambda: self._client.get(url, params=request_params))
+        response.raise_for_status()
+        return response.json()
 
     def geocode(self, *, address: str, city: str | None = None) -> dict[str, Any] | None:
         params: dict[str, Any] = {"address": address}
@@ -90,11 +91,11 @@ class AmapClient:
                     "cityname": item.get("cityname"),
                     "pname": item.get("pname"),
                     "adname": item.get("adname"),
-                    "tel": self._safe_str(item.get("tel")),
-                    "business_area": self._safe_str(item.get("business_area")),
-                    "keytag": self._safe_str(item.get("keytag")),
-                    "price": self._safe_str(biz_ext.get("lowest_price") or biz_ext.get("cost")),
-                    "rating": self._safe_str(biz_ext.get("rating")),
+                    "tel": safe_str(item.get("tel")),
+                    "business_area": safe_str(item.get("business_area")),
+                    "keytag": safe_str(item.get("keytag")),
+                    "price": safe_str(biz_ext.get("lowest_price") or biz_ext.get("cost")),
+                    "rating": safe_str(biz_ext.get("rating")),
                     "star": self._extract_star(item.get("type")),
                 }
             )
@@ -107,11 +108,6 @@ class AmapClient:
             if star_name in text:
                 return num
         return None
-
-    def _safe_str(self, value: Any) -> str | None:
-        if value in (None, "", [], {}):
-            return None
-        return str(value)
 
     def plan_transit(self, *, origin: tuple[float, float], destination: tuple[float, float], city: str) -> dict[str, Any] | None:
         data = self.get_json(
@@ -131,10 +127,10 @@ class AmapClient:
         best = transits[0]
         return {
             "mode": "transit",
-            "distance_meters": self._safe_float(best.get("distance")),
-            "duration_seconds": self._safe_float(best.get("duration")),
-            "price": self._safe_float(best.get("cost")),
-            "walking_distance": self._safe_float(best.get("walking_distance")),
+            "distance_meters": safe_float(best.get("distance")),
+            "duration_seconds": safe_float(best.get("duration")),
+            "price": safe_float(best.get("cost")),
+            "walking_distance": safe_float(best.get("walking_distance")),
             "transits": transits,
         }
 
@@ -155,11 +151,11 @@ class AmapClient:
         best = paths[0]
         return {
             "mode": "driving",
-            "distance_meters": self._safe_float(best.get("distance")),
-            "duration_seconds": self._safe_float(best.get("duration")),
-            "traffic_lights": self._safe_int(best.get("traffic_lights")),
+            "distance_meters": safe_float(best.get("distance")),
+            "duration_seconds": safe_float(best.get("duration")),
+            "traffic_lights": safe_int(best.get("traffic_lights")),
             # taxi_cost 位于 route 级，取整条路线的预估出租车费
-            "cost": self._safe_float(route.get("taxi_cost")),
+            "cost": safe_float(route.get("taxi_cost")),
         }
 
     def plan_walking(self, *, origin: tuple[float, float], destination: tuple[float, float]) -> dict[str, Any] | None:
@@ -177,8 +173,8 @@ class AmapClient:
         best = paths[0]
         return {
             "mode": "walking",
-            "distance_meters": self._safe_float(best.get("distance")),
-            "duration_seconds": self._safe_float(best.get("duration")),
+            "distance_meters": safe_float(best.get("distance")),
+            "duration_seconds": safe_float(best.get("duration")),
         }
 
     def get_weather_forecast(self, *, city: str) -> dict[str, Any] | None:
@@ -212,8 +208,8 @@ class AmapClient:
                     "week": item.get("week"),
                     "dayweather": item.get("dayweather"),
                     "nightweather": item.get("nightweather"),
-                    "daytemp": self._safe_int(item.get("daytemp")),
-                    "nighttemp": self._safe_int(item.get("nighttemp")),
+                    "daytemp": safe_int(item.get("daytemp")),
+                    "nighttemp": safe_int(item.get("nighttemp")),
                     "daywind": item.get("daywind"),
                     "nightwind": item.get("nightwind"),
                     "daypower": item.get("daypower"),
@@ -228,19 +224,7 @@ class AmapClient:
         if not raw or "," not in raw:
             return None, None
         lng_text, lat_text = raw.split(",", 1)
-        return self._safe_float(lng_text), self._safe_float(lat_text)
-
-    def _safe_float(self, value: Any) -> float | None:
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return None
-
-    def _safe_int(self, value: Any) -> int | None:
-        try:
-            return int(float(value))
-        except (TypeError, ValueError):
-            return None
+        return safe_float(lng_text), safe_float(lat_text)
 
     def _normalize_city_name(self, value: Any) -> str | None:
         if isinstance(value, list):

@@ -1,4 +1,4 @@
-from app.knowledge.collections import (
+from app.knowledge.ingest import (
     ATTRACTION_COLLECTION,
     CHAT_COLLECTION,
     QA_COLLECTION,

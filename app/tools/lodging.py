@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.infrastructure.amap_client import amap_client
+from app.infrastructure.conversions import safe_float, safe_str
 from app.tools.schema.lodging import LodgingCandidate, LodgingInput, LodgingResult
 
 # lodging_tool 的需求边界：给定目的地 + 偏好 + 行程景点，返回 top N 住宿候选，LLM 自主选择锚点
@@ -193,21 +194,21 @@ class LodgingTool:
         poi_type = str(poi.get("type") or "").strip()
         if not name or self._is_non_lodging(name, poi_type):
             return None
-        lng = self._to_float(poi.get("lng"))
-        lat = self._to_float(poi.get("lat"))
+        lng = safe_float(poi.get("lng"))
+        lat = safe_float(poi.get("lat"))
         nearest, average = self._distances_to_spots(spot_coords, lng, lat)
         area = poi.get("business_area") or poi.get("adname") or poi.get("cityname") or lodging_input.destination
-        keytag = self._optional_string(poi.get("keytag"))
+        keytag = safe_str(poi.get("keytag"))
         if enforce_keytag and not self._keytag_matches_preferences(keytag, lodging_input.preferences):
             return None
         return _RankedCandidate(
             candidate=LodgingCandidate(
-                poi_id=self._optional_string(poi.get("poi_id")),
+                poi_id=safe_str(poi.get("poi_id")),
                 name=name,
-                area=self._optional_string(area),
-                address=self._optional_string(poi.get("address")),
-                tel=self._optional_string(poi.get("tel")),
-                rating=self._optional_string(poi.get("rating")),
+                area=safe_str(area),
+                address=safe_str(poi.get("address")),
+                tel=safe_str(poi.get("tel")),
+                rating=safe_str(poi.get("rating")),
                 keytag=keytag,
                 distance_to_spots_km=nearest,
             ),
@@ -271,7 +272,7 @@ class LodgingTool:
         text = f"{candidate.name} {candidate.area or ''} {candidate.address or ''}".lower()
         score = 0.0
         # 评分越高越好（缺失评分不加分也不罚分）
-        rating = self._to_float(candidate.rating)
+        rating = safe_float(candidate.rating)
         if rating is not None:
             score -= max(0.0, (rating - 4.0)) * 4  # 4.0 → 0，4.5 → -2，4.8 → -3.2
         # 名称是明确住宿实体
@@ -343,8 +344,8 @@ class LodgingTool:
     def _extract_coords(self, item: dict[str, Any] | None) -> tuple[float, float] | None:
         if not item:
             return None
-        lng = self._to_float(item.get("lng"))
-        lat = self._to_float(item.get("lat"))
+        lng = safe_float(item.get("lng"))
+        lat = safe_float(item.get("lat"))
         return (lng, lat) if lng is not None and lat is not None else None
 
     def _unique_queries(self, queries: list[tuple[str, str, str]]) -> list[tuple[str, str, str]]:
@@ -371,17 +372,6 @@ class LodgingTool:
                 seen.add(text)
                 unique.append(text)
         return unique
-
-    def _optional_string(self, value: Any) -> str | None:
-        if value in (None, "", [], {}):
-            return None
-        return str(value).strip() or None
-
-    def _to_float(self, value: Any) -> float | None:
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return None
 
 
 lodging_tool = LodgingTool()

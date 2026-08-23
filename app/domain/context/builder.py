@@ -1,3 +1,5 @@
+"""上下文工厂：统一构造 PlanningContext（内存态只读，不含会话状态写回）"""
+
 from __future__ import annotations
 
 from app.domain.common.planning import PlanningRequest
@@ -5,7 +7,6 @@ from app.domain.common.session_context import SessionContext, compute_confirmed_
 from app.domain.context.planning import PlanningContext
 from app.domain.memory.manager import memory_manager
 
-"""上下文工厂：统一构造 PlanningContext（内存态只读，不含会话状态写回）"""
 
 def _session_context_from_request(request: PlanningRequest, session_id: str | None) -> SessionContext:
     """从 PlanningRequest 推导最小 SessionContext

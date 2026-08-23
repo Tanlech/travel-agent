@@ -5,6 +5,7 @@ from typing import Any
 
 import httpx
 
+from app.infrastructure.conversions import retry_call, safe_int
 from app.infrastructure.settings import settings
 
 
@@ -37,6 +38,7 @@ class QWeatherClient:
 
     def __init__(self, config: QWeatherClientConfig | None = None) -> None:
         self.config = config or QWeatherClientConfig.from_env()
+        self._client = httpx.Client(timeout=self.config.timeout_seconds)  # 复用连接，避免每次请求重新握手
 
     def is_enabled(self) -> bool:
         return bool(self.config.api_key and self.config.geo_api_key and self.config.host)
@@ -48,10 +50,9 @@ class QWeatherClient:
         try:
             url = f"https://{self.config.host}/geo/v2/city/lookup"
             headers = {"X-QW-Api-Key": self.config.geo_api_key}
-            with httpx.Client(timeout=self.config.timeout_seconds) as client:
-                response = client.get(url, params={"location": city}, headers=headers)
-                response.raise_for_status()
-                data = response.json()
+            response = retry_call(lambda: self._client.get(url, params={"location": city}, headers=headers))
+            response.raise_for_status()
+            data = response.json()
         except Exception:
             return None
         if str(data.get("code")) != "200":
@@ -62,8 +63,8 @@ class QWeatherClient:
         item = locations[0]
         return {
             "location_id": item.get("id"),
-            "lng": self._safe_int(item.get("lon")),
-            "lat": self._safe_int(item.get("lat")),
+            "lng": safe_int(item.get("lon")),
+            "lat": safe_int(item.get("lat")),
         }
 
     def _get_json(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -71,10 +72,9 @@ class QWeatherClient:
             raise RuntimeError("QWeather API key or host is not configured")
         url = f"https://{self.config.host}{path}"
         headers = {"X-QW-Api-Key": self.config.api_key}
-        with httpx.Client(timeout=self.config.timeout_seconds) as client:
-            response = client.get(url, params=params, headers=headers)
-            response.raise_for_status()
-            return response.json()
+        response = retry_call(lambda: self._client.get(url, params=params, headers=headers))
+        response.raise_for_status()
+        return response.json()
 
     def get_daily_forecast(self, *, location: str, days: int) -> list[dict[str, Any]]:
         """每日预报：按所需天数自动选择 /v7/weather/{days}d 端点"""
@@ -92,8 +92,8 @@ class QWeatherClient:
             {
                 "date": item.get("fxDate"),
                 "weather_day": item.get("textDay"),
-                "temp_max": self._safe_int(item.get("tempMax")),
-                "temp_min": self._safe_int(item.get("tempMin")),
+                "temp_max": safe_int(item.get("tempMax")),
+                "temp_min": safe_int(item.get("tempMin")),
                 "wind_dir_day": item.get("windDirDay"),
                 "wind_scale_day": item.get("windScaleDay"),
                 "humidity": item.get("humidity"),
@@ -113,12 +113,6 @@ class QWeatherClient:
             if needed <= limit:
                 return f"{limit}d"
         return f"{max_days}d"
-
-    def _safe_int(self, value: Any) -> int | None:
-        try:
-            return int(float(value))
-        except (TypeError, ValueError):
-            return None
 
 
 qweather_client = QWeatherClient(QWeatherClientConfig.from_env())

@@ -36,6 +36,13 @@ class LLMClient:
     def is_enabled(self) -> bool:
         return self.enabled and self.client is not None
 
+    def _ensure_enabled(self) -> bool:
+        """LLM 可用性检查；不可用时记录 disabled 并返回 False"""
+        if self.is_enabled():
+            return True
+        self.last_debug_info = {"status": "disabled"}
+        return False
+
     @property
     def last_debug_info(self) -> dict[str, Any]:
         """当前线程最近一次调用的调试信息"""
@@ -176,8 +183,7 @@ class LLMClient:
     # 与 _generate_structured 的区别：不强制 JSON，不重试解析，直接返回纯文本
     # LLM 不可用/报错/空回复时返回 None，由调用方降级
     def generate_chat_reply(self, *, system_prompt: str, user_prompt: str) -> str | None:
-        if not self.is_enabled():
-            self.last_debug_info = {"status": "disabled"}
+        if not self._ensure_enabled():
             return None
         try:
             response = self.client.chat.completions.create(
@@ -214,8 +220,7 @@ class LLMClient:
         max_rounds: int = 6,
         execute_tool=None,
     ) -> str | None:
-        if not self.is_enabled():
-            self.last_debug_info = {"status": "disabled"}
+        if not self._ensure_enabled():
             return None
 
         messages: list[dict] = [
@@ -302,8 +307,7 @@ class LLMClient:
         user_prompt: str,
         retry_hints: list[str],
     ) -> Any | None:
-        if not self.is_enabled():
-            self.last_debug_info = {"status": "disabled"}
+        if not self._ensure_enabled():
             return None
 
         schema_instruction = self._build_schema_instruction(schema)
@@ -356,6 +360,8 @@ class LLMClient:
                     "attempt": attempt,
                     "reason": last_error,
                 }
+                if attempt < self.max_retries:
+                    time.sleep(0.5 * (attempt + 1))
                 continue
 
             parsed = self._parse_structured(schema, content)

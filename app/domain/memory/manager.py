@@ -1,11 +1,11 @@
+"""记忆融合：存储偏好 + 当前请求偏好 → UserContext；规划后持久化"""
+
 from __future__ import annotations
 
 from app.domain.common.planning import PlanningRequest
 from app.domain.common.user import UserContext
 from app.domain.memory.schema import TripMemory, UserMemory
 from app.domain.memory.store import MemoryStore, memory_store
-
-"""记忆融合：存储偏好 + 当前请求偏好 → UserContext；规划后持久化"""
 
 # 否定前缀（长前缀优先，避免"不喜欢"被"不"提前截断）
 _NEGATION_PREFIXES = ("不喜欢", "不想", "不要", "讨厌", "不愿意", "别", "不")

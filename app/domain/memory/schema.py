@@ -1,10 +1,11 @@
+"""长期记忆数据模型：用户偏好 + 行程记忆"""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field
 
-"""长期记忆数据模型：用户偏好 + 行程记忆"""
 
 class UserMemory(BaseModel):
     """跨会话累积的用户偏好（Redis mem:user:{id} 持久化）"""

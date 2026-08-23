@@ -22,6 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from app.knowledge import ATTRACTION_COLLECTION, knowledge_service  # noqa: E402
+from app.knowledge.ingest.attraction import ingest_city  # noqa: E402
 
 # 数据目录：项目根 data/attraction
 OUT_DIR = Path(__file__).resolve().parents[2] / "data" / "attraction"
@@ -38,38 +39,8 @@ def _find_doc_paths() -> list[Path]:
 
 
 def import_spots(city: str, spots: list[dict], province: str = "") -> int:
-    """把一个城市的景点清单写入 Qdrant（metadata 含 city；province 由文档提供时写入，支持省市隔离）"""
-    entries = []
-    for spot in spots:
-        name = str(spot.get("name") or "").strip()
-        if not name:
-            continue
-        area = str(spot.get("area") or "").strip()
-        duration = spot.get("estimated_visit_duration_hours", 2.0)
-        reason = str(spot.get("reason") or "").strip()
-        tags = [str(t).strip() for t in (spot.get("tags") or []) if str(t).strip()]
-        entries.append(
-            {
-                "id": f"{city}:{name}",  # 稳定 id：同景点重复导入自动覆盖
-                "text": f"{name}：{reason}（位于{area}，建议游玩{duration}小时）",
-                "name": name,
-                "city": city,
-                "province": province,
-                "area": area,
-                "tags": ",".join(tags),
-                "duration": str(duration),
-                "reason": reason,
-            }
-        )
-    if not entries:
-        return 0
-    count = knowledge_service.ingest_entries(
-        ATTRACTION_COLLECTION,
-        entries,
-        text_key="text",
-        metadata_keys=("name", "city", "province", "area", "tags", "duration", "reason"),
-    )
-    return count
+    """把一个城市的景点清单写入 Qdrant（复用唯一入库入口）"""
+    return ingest_city(city, spots, province=province)
 
 
 def main() -> None:

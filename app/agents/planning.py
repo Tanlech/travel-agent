@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import date, timedelta
 
 from app.agents.prompt.planning import (
@@ -24,11 +27,13 @@ from app.agents.schema.planning import (
     TransportCheckRequest,
     TripPlan,
 )
+from app.agents.reflection import planning_reflection
+from app.agents.repair import planning_repair
 from app.agents.sparse.planning import build_cluster_plan_prompt, build_itinerary_render_prompt, build_skeleton_prompt
 from app.domain.context.builder import context_builder
 from app.domain.context.planning import PlanningContext
 from app.domain.common.planning import extract_plan_attractions
-from app.domain.common.itinerary import ItineraryDraftSchema
+from app.domain.common.itinerary import ItineraryDayPlan, ItineraryDraftSchema
 from app.infrastructure.llm_client import get_llm_client
 from app.domain.memory.manager import memory_manager
 from app.tools.attraction import attraction_tool
@@ -40,6 +45,19 @@ from app.tools.schema.transport import TransportInput
 from app.tools.schema.weather import WeatherInput
 from app.tools.transport import transport_tool
 from app.tools.weather import weather_tool
+
+
+@dataclass
+class ConvergenceBudget:
+    """统一收敛预算：跨阶段共享，LLM 修复与规则修复分开计量
+
+    llm_rounds 供全局一致性 pass 的 LLM 修复（API 成本）；rule_rounds 供分日
+    worker 与全局 pass 的规则式修复（CPU 成本）。各阶段从同一预算读取，
+    保证总修复成本受控，避免阶段间叠加超支。
+    """
+
+    llm_rounds: int = 2
+    rule_rounds: int = 3
 
 
 class PlanningAgent:
@@ -114,10 +132,10 @@ class PlanningAgent:
             )
 
         lodging_anchor = self._resolve_lodging_anchor(state, skeleton)
-        draft = self._render_final_itinerary(state, skeleton, lodging_anchor)
-        draft = self._light_validate_and_repair(state, draft, skeleton, lodging_anchor, budgets)
+        state.draft = self._render_final_itinerary(state, skeleton, lodging_anchor)
+        state = self._converge_draft(state, budgets)
+        draft = state.draft
 
-        state.draft = draft
         state.trace.append({"step": "plan_agent", "day_count": len(draft.day_plans)})
         state.plan = self._compose_plan(state, skeleton, lodging_anchor)
         state.status = "completed"
@@ -562,72 +580,161 @@ class PlanningAgent:
 
         raise RuntimeError(f"Failed to render itinerary draft from LLM. Debug: {llm_client.last_debug_info}")
 
-    def _light_validate_and_repair(
+    def _converge_draft(self, state: PlanningContext, budgets: PlanningBudgets) -> PlanningContext:
+        """收敛式校验修复：先分日并行收敛（Orchestrator-Workers），再全局一致性 pass
+        与 revise 复用同一套 reflection + repair，避免"同类问题一处修一处崩"
+        """
+        # Phase 4：统一收敛预算，各阶段共享，LLM 修复与规则修复分开计量
+        budget = ConvergenceBudget(
+            llm_rounds=max(int(budgets.render_repair_remaining), 1),
+            rule_rounds=max(int(budgets.render_repair_remaining), 1),
+        )
+        # 阶段一：分日并行收敛，各天在独立 state 副本上收敛，互不阻塞
+        day_indices = [day.day_index for day in state.draft.day_plans]
+        converged, repairs, day_observations = self._converge_days_parallel(state, day_indices, budget)
+        state.revision_count += repairs
+        for obs in day_observations:
+            state.trace.append({"step": "converge_observe", **obs})
+        # 合并各天结果后统一收口（天气备注/块结构/跨天去重/摘要）
+        day_map = {day.day_index: day for day in state.draft.day_plans}
+        for day_index, new_day in converged.items():
+            day_map[day_index] = new_day
+        state.draft.day_plans = [day_map[idx] for idx in sorted(day_map)]
+        state = planning_repair.finalize_draft(state)
+        # 阶段二：全局一致性 pass（Phase 3），处理跨天/全局不变式并定向回修
+        state = self._converge_global_pass(state, budget)
+        state.trace.append(
+            {
+                "step": "plan_converge",
+                "reflection_status": state.reflection_result.status if state.reflection_result else None,
+                "revision_count": state.revision_count,
+                "day_count": len(day_indices),
+            }
+        )
+        if not state.draft or not state.draft.day_plans:
+            raise RuntimeError("Failed to converge itinerary draft.")
+        return state
+
+    def _record_observation(
         self,
         state: PlanningContext,
-        draft: ItineraryDraftSchema,
-        skeleton: PlanningSkeleton,
-        lodging_anchor: LodgingAnchorDecision,
-        budgets: PlanningBudgets,
-    ) -> ItineraryDraftSchema:
-        if not draft.day_plans:
-            raise RuntimeError("LLM returned empty itinerary draft.")
+        *,
+        phase: str,
+        round_no: int,
+        status: str,
+        issue_codes: list[str] | None = None,
+        action: str | None = None,
+        budget_used: int = 0,
+    ) -> None:
+        """每阶段观测日志：记录一次评审-修复迭代的结论与预算消耗，写入 state.trace"""
+        state.trace.append(
+            {
+                "step": "converge_observe",
+                "phase": phase,
+                "round": round_no,
+                "status": status,
+                "issues": list(issue_codes or []),
+                "action": action,
+                "budget_used": budget_used,
+            }
+        )
 
-        draft.day_plans = sorted(draft.day_plans, key=lambda item: item.day_index)
-        for day in draft.day_plans:
-            cleaned_blocks = []
-            previous_end = None
-            for block in sorted(day.time_blocks, key=lambda item: item.start_time):
-                if block.start_time >= block.end_time:
-                    continue
-                if previous_end and block.start_time < previous_end:
-                    continue
-                cleaned_blocks.append(block)
-                previous_end = block.end_time
-            day.time_blocks = cleaned_blocks
-            day.notes = self._normalize_day_notes(day.notes)
-            for block in day.time_blocks:
-                if block.item_type == "attraction":
-                    block.detail = self._normalize_candidate_detail(block.detail, block.area)
+    def _converge_global_pass(self, state: PlanningContext, budget: ConvergenceBudget) -> PlanningContext:
+        """Phase 3 全局一致性 pass：跨天/全局不变式定向收敛（受 Phase 4 统一预算约束）
 
-        if state.request.must_visit_spots:
-            all_titles = {block.title for day in draft.day_plans for block in day.time_blocks if block.item_type == "attraction"}
-            if not all(any(must_visit in title or title in must_visit for title in all_titles) for must_visit in state.request.must_visit_spots):
-                raise RuntimeError("LLM draft is missing required must-visit spots.")
+        分日并行（Phase 2）已收敛天内部（daily_plan）不变式；此阶段聚焦跨天不变式：
+        必去景点覆盖、跨天去重、天气跨天分流、候选/住宿/天气可用性等。修复依赖
+        reflection 产出的 fix_hint 携带 day_index（best_fit_day/受影响天），
+        由 repair 定向重建受影响的天，避免全量 rebuild 扰动已收敛的其它天。
+        LLM 修复（API 成本）受 llm_rounds 限制，超出后回退规则式修复（rule_rounds）。
+        """
+        llm_left = budget.llm_rounds
+        rule_left = budget.rule_rounds
+        rounds = 0
+        while (llm_left > 0 or rule_left > 0) and rounds < budget.llm_rounds + budget.rule_rounds:
+            state.reflection_result = planning_reflection.review(state)
+            status = state.reflection_result.status
+            issue_codes = [issue.code for issue in state.reflection_result.issues]
+            budget_used = (budget.llm_rounds - llm_left) + (budget.rule_rounds - rule_left)
+            if status != "revise":
+                self._record_observation(state, phase="global_pass", round_no=rounds + 1, status=status, issue_codes=issue_codes, budget_used=budget_used)
+                break
+            if llm_left > 0 and get_llm_client().is_enabled():
+                state = planning_repair.repair(state)
+                llm_left -= 1
+                action = "repair_llm"
+            elif rule_left > 0:
+                state = planning_repair.rule_based_repair(state)
+                rule_left -= 1
+                action = "repair_rule"
+            else:
+                break
+            rounds += 1
+            self._record_observation(state, phase="global_pass", round_no=rounds, status=status, issue_codes=issue_codes, action=action, budget_used=(budget.llm_rounds - llm_left) + (budget.rule_rounds - rule_left))
+        return state
 
-        if any(
-            block.item_type == "attraction" and block.start_time >= "21:30"
-            for day in draft.day_plans
-            for block in day.time_blocks
-        ):
-            raise RuntimeError("LLM draft contains attraction blocks scheduled too late.")
+    def _converge_days_parallel(
+        self,
+        state: PlanningContext,
+        day_indices: list[int],
+        budget: ConvergenceBudget,
+    ) -> tuple[dict[int, ItineraryDayPlan], int, list[dict]]:
+        """分日并行收敛：ThreadPoolExecutor 并发跑单天 worker，返回各天 day_plan、总修复次数与观测日志"""
+        if not day_indices:
+            return {}, 0, []
+        workers = min(len(day_indices), os.cpu_count() or 1)
+        converged: dict[int, ItineraryDayPlan] = {}
+        total_repairs = 0
+        observations: list[dict] = []
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(self._converge_day_worker, state, day_index, budget): day_index
+                for day_index in day_indices
+            }
+            for future in as_completed(futures):
+                day_index = futures[future]
+                new_day, repairs, obs = future.result()
+                converged[day_index] = new_day
+                total_repairs += repairs
+                observations.extend(obs)
+        return converged, total_repairs, observations
 
-        short_days = self._find_short_day_indices(draft)
-        if short_days and budgets.render_repair_remaining > 0 and self._needs_llm_repair(draft, short_days):
-            repaired = self._repair_invalid_draft(state, skeleton, lodging_anchor, short_days)
-            budgets.render_repair_remaining -= 1
-            if repaired:
-                repaired.day_plans = sorted(repaired.day_plans, key=lambda item: item.day_index)
-                for day in repaired.day_plans:
-                    cleaned_blocks = []
-                    previous_end = None
-                    for block in sorted(day.time_blocks, key=lambda item: item.start_time):
-                        if block.start_time >= block.end_time:
-                            continue
-                        if previous_end and block.start_time < previous_end:
-                            continue
-                        cleaned_blocks.append(block)
-                        previous_end = block.end_time
-                    day.time_blocks = cleaned_blocks
-                    day.notes = self._normalize_day_notes(day.notes)
-                    for block in day.time_blocks:
-                        if block.item_type == "attraction":
-                            block.detail = self._normalize_candidate_detail(block.detail, block.area)
-                if not self._find_short_day_indices(repaired):
-                    draft = repaired
+    def _converge_day_worker(
+        self,
+        state: PlanningContext,
+        day_index: int,
+        budget: ConvergenceBudget,
+    ) -> tuple[ItineraryDayPlan, int, list[dict]]:
+        """单天并发 worker：在独立 state 副本上收敛指定天（daily_plan 域，规则式）
 
-        return draft
-
+        只重建目标天、不做整篇 finalize/去重（去重由合并后的统一 finalize 处理），
+        返回最终 day_plan、本天修复次数与本天观测日志，供编排层合并
+        """
+        work = state.model_copy(deep=True)
+        repairs = 0
+        observations: list[dict] = []
+        for round_no in range(budget.rule_rounds):
+            result = planning_reflection.review(work, scopes={"daily_plan"}, days={day_index})
+            work.reflection_result = result
+            observations.append(
+                {
+                    "phase": f"day_{day_index}",
+                    "round": round_no + 1,
+                    "status": result.status,
+                    "issues": [issue.code for issue in result.issues],
+                    "action": "rebuild_day" if result.status == "revise" else None,
+                    "budget_used": repairs,
+                }
+            )
+            if result.status != "revise":
+                break
+            work.draft.day_plans = [
+                planning_repair.rebuild_day(work, day_index) if day.day_index == day_index else day
+                for day in work.draft.day_plans
+            ]
+            repairs += 1
+        final_day = next(day for day in work.draft.day_plans if day.day_index == day_index)
+        return final_day, repairs, observations
 
     def _compose_plan(self, state: PlanningContext, skeleton: PlanningSkeleton, lodging_anchor: LodgingAnchorDecision) -> TripPlan:
         draft = state.draft
@@ -792,74 +899,6 @@ class PlanningAgent:
             optional_spots=list(request.optional_spots or []),
             avoid_spots=list(request.avoid_spots or []),
         )
-
-    def _find_short_day_indices(self, draft: ItineraryDraftSchema) -> list[int]:
-        short_days: list[int] = []
-        for day in draft.day_plans:
-            return_end = None
-            evening_meal_exists = False
-            evening_block_exists = False
-            last_non_return_end = None
-
-            for block in day.time_blocks:
-                if block.item_type == "return":
-                    return_end = block.end_time
-                    continue
-                last_non_return_end = block.end_time
-                if block.item_type == "meal" and block.start_time >= "17:00":
-                    evening_meal_exists = True
-                if block.item_type in {"flex", "attraction", "meal"} and block.start_time >= "18:30":
-                    evening_block_exists = True
-
-            if return_end and return_end < "20:30":
-                short_days.append(day.day_index)
-                continue
-            if last_non_return_end and last_non_return_end < "20:00":
-                short_days.append(day.day_index)
-                continue
-            if not evening_meal_exists or not evening_block_exists:
-                short_days.append(day.day_index)
-
-        return short_days
-
-    def _repair_invalid_draft(
-        self,
-        state: PlanningContext,
-        skeleton: PlanningSkeleton,
-        lodging_anchor: LodgingAnchorDecision,
-        short_days: list[int],
-    ) -> ItineraryDraftSchema | None:
-        llm_client = get_llm_client()
-        payload = FinalItineraryRenderInput(
-            request=state.request.model_dump(),
-            skeleton=skeleton.model_dump(),
-            weather=[item.model_dump() for item in (state.weather_result.daily if state.weather_result else [])],
-            attraction_candidates=[item.model_dump() for item in (state.attraction_result.candidates if state.attraction_result else [])],
-            lodging_candidates=[item.model_dump() for item in (state.lodging_result.candidates if state.lodging_result else [])],
-            selected_lodging=state.selected_lodging.model_dump() if state.selected_lodging else None,
-            planning_anchor=lodging_anchor.model_dump(),
-            transport_evidence=[item.model_dump() for item in state.transport_results],
-        )
-        prompt = build_itinerary_render_prompt(payload)
-        retry_prompt = (
-            prompt
-            + "\n\n[short_day_retry]\n"
-            + f"以下天数结束过早或缺失正式晚间时段：{short_days}。"
-            + "请在不改变 skeleton 主选点决策的前提下，把这些天重新渲染成完整可用旅行日：显式补足晚餐、晚间正式活动/夜游/夜景/茶馆/商圈收尾，并把返程默认放在20:30之后、最好接近21:00–22:00；"
-            + "不要制造长时间空窗，也不要只补一个很短的夜间块。"
-        )
-        return llm_client.generate_itinerary_draft(system_prompt=self._render_prompt, user_prompt=retry_prompt)
-
-    def _needs_llm_repair(self, draft: ItineraryDraftSchema, short_days: list[int]) -> bool:
-        for day in draft.day_plans:
-            if day.day_index not in short_days:
-                continue
-            attraction_count = sum(1 for block in day.time_blocks if block.item_type == "attraction")
-            meal_count = sum(1 for block in day.time_blocks if block.item_type == "meal")
-            has_evening_block = any(block.start_time >= "18:30" for block in day.time_blocks if block.item_type in {"attraction", "meal", "flex", "return"})
-            if len(day.time_blocks) <= 4 or attraction_count == 0 or meal_count < 2 or not has_evening_block:
-                return True
-        return False
 
     def _should_collect_lodging(self, state: PlanningContext) -> bool:
         return state.request.days >= 2

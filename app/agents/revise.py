@@ -23,7 +23,7 @@ from app.agents.schema.revise import (
     RevisionIntent,
 )
 from app.agents.sparse.revise import build_block_level_revise_prompt, build_day_level_revise_prompt, build_global_revise_prompt, build_revision_intent_prompt
-from app.domain.common.itinerary import ItineraryDraftSchema
+from app.domain.common.itinerary import ItineraryDayPlan, ItineraryDraftSchema, ItineraryTimeBlockSchema
 from app.infrastructure.llm_client import get_llm_client
 from app.tools.attraction import attraction_tool
 from app.tools.lodging import lodging_tool
@@ -522,20 +522,7 @@ class ReviseAgent:
             artifacts=agent_output.artifacts.__class__(draft=state.draft, plan=state.plan),
             revision_intent=agent_output.revision_intent,
             impact_analysis=agent_output.impact_analysis,
-            revision_trace=agent_output.revision_trace.__class__(
-                [
-                    *agent_output.revision_trace,
-                    *[
-                        ReviseDebugTrace(
-                            step=item.get("step", "revise_followup"),
-                            status=item.get("status") if isinstance(item.get("status"), str) else None,
-                            message=item.get("message") if isinstance(item.get("message"), str) else None,
-                            payload=item if isinstance(item, dict) else {},
-                        )
-                        for item in state.trace[len(agent_output.revision_trace) :]
-                    ],
-                ]
-            ),
+            revision_trace=self._merge_revision_trace(agent_output, state),
             revision_summary={
                 **agent_output.revision_summary,
                 "reflection_status": state.reflection_result.status if state.reflection_result else None,
@@ -546,8 +533,52 @@ class ReviseAgent:
             summary=agent_output.summary,
         )
 
-    def _recover_draft(self, _agent_input: ReviseAgentInput):
-        raise ValueError("ReviseAgent requires current_draft for this skeleton version.")
+    def _recover_draft(self, agent_input: ReviseAgentInput) -> ItineraryDraftSchema:
+        """current_draft 缺失时，从 current_plan 的 daily_plan 重建一版 draft 作兜底，避免硬崩"""
+        plan = agent_input.current_plan
+        if not plan or not plan.daily_plan:
+            raise ValueError("ReviseAgent requires current_draft or current_plan.daily_plan to reconstruct a draft.")
+        try:
+            day_plans = [
+                ItineraryDayPlan(
+                    day_index=item.get("day_index", index + 1),
+                    primary_area=item.get("primary_area"),
+                    time_blocks=[
+                        ItineraryTimeBlockSchema(
+                            start_time=block.get("start_time", ""),
+                            end_time=block.get("end_time", ""),
+                            item_type=block.get("item_type", "flex"),
+                            title=block.get("title", ""),
+                            detail=block.get("detail"),
+                            area=block.get("area"),
+                        )
+                        for block in item.get("items") or []
+                    ],
+                    notes=[str(note) for note in item.get("notes") or []],
+                )
+                for index, item in enumerate(plan.daily_plan)
+            ]
+            return ItineraryDraftSchema(
+                destination=plan.destination,
+                summary=plan.summary or "",
+                route_intent_summary=getattr(plan, "route_intent_summary", None),
+                day_plans=day_plans,
+            )
+        except (ValueError, TypeError, KeyError) as exc:
+            raise ValueError(f"ReviseAgent failed to reconstruct draft from current_plan: {exc}") from exc
+
+    def _merge_revision_trace(self, agent_output: ReviseAgentOutput, state: PlanningContext) -> list[ReviseDebugTrace]:
+        """把评审/修复阶段追加的 state 日志并回 revision_trace，作为同类型调试记录"""
+        new_steps = [
+            ReviseDebugTrace(
+                step=item.get("step", "revise_followup"),
+                status=item.get("status") if isinstance(item.get("status"), str) else None,
+                message=item.get("message") if isinstance(item.get("message"), str) else None,
+                payload=item if isinstance(item, dict) else {},
+            )
+            for item in state.trace[len(agent_output.revision_trace) :]
+        ]
+        return [*agent_output.revision_trace, *new_steps]
 
     def _is_revision_intent_usable(self, intent: RevisionIntent) -> bool:
         return bool(intent.user_message and intent.change_scope and intent.revision_goal)

@@ -47,6 +47,24 @@ class PlanningRepair:
         state.trace.append({"step": "repair", "repair_scope": list(getattr(state.reflection_result, "repair_scope", []) or []), "revision_count": state.revision_count})
         return state
 
+    def rule_based_repair(self, state: PlanningContext) -> PlanningContext:
+        """规则式定向修复：按 reflection issues 建任务并应用，不走 LLM（供单天收敛 worker 复用）"""
+        return self._rule_based_repair(state, self._build_repair_plan(state))
+
+    def rebuild_day(self, state: PlanningContext, day_index: int) -> ItineraryDayPlan:
+        """仅重建指定天并返回（不做整篇 finalize/跨天去重），供单天并发 worker 使用
+
+        依赖 state.reflection_result 中该天的问题生成修复任务；跨天去重由合并后的 finalize_draft 统一处理
+        """
+        tasks = self._build_repair_plan(state)
+        base_day = next((day for day in state.draft.day_plans if day.day_index == day_index), None)
+        return self._rebuild_day_plan(state, day_index, tasks, base_day)
+
+    def finalize_draft(self, state: PlanningContext) -> PlanningContext:
+        """对整篇 draft 做归一化收口（天气备注/块结构/跨天去重/摘要），供并行合并后统一调用一次"""
+        state.draft = self._finalize_draft(state, state.draft)
+        return state
+
     def _build_repair_plan(self, state: PlanningContext) -> list[RepairTask]:
         tasks: list[RepairTask] = []
         for issue in getattr(state.reflection_result, "issues", []) or []:
@@ -88,6 +106,7 @@ class PlanningRepair:
             "weather_misalignment": "weather_adjust",
             "heat_sparse_risk": "fill_day",
             "sub_spot_present": "replace_sub_spots",
+            "cross_day_duplicate": "rebuild_day",
         }
         return mapping.get(code, "rebuild_day")
 
@@ -99,7 +118,16 @@ class PlanningRepair:
         target_days = self._collect_target_days(state, repair_tasks)
         for day_index in target_days:
             relevant_tasks = [task for task in repair_tasks if task.day_index in (None, day_index)]
-            all_days[day_index] = self._rebuild_day_plan(state, day_index, relevant_tasks, all_days.get(day_index))
+            occupied_titles = {
+                block.title
+                for other_index, other_day in all_days.items()
+                if other_index != day_index
+                for block in other_day.time_blocks
+                if block.item_type == "attraction"
+            }
+            all_days[day_index] = self._rebuild_day_plan(
+                state, day_index, relevant_tasks, all_days.get(day_index), occupied_titles=occupied_titles
+            )
 
         state.draft.day_plans = [all_days[idx] for idx in sorted(all_days)]
         state.draft = self._finalize_draft(state, state.draft)
@@ -165,6 +193,13 @@ class PlanningRepair:
                         )
                     )
             relevant_tasks = [task for task in repair_tasks if task.day_index in (None, repaired_day.day_index)]
+            occupied_titles = {
+                block.title
+                for other_index, other_day in day_map.items()
+                if other_index != repaired_day.day_index
+                for block in other_day.time_blocks
+                if block.item_type == "attraction"
+            }
             rebuilt_days[repaired_day.day_index] = self._rebuild_day_plan(
                 state,
                 repaired_day.day_index,
@@ -173,13 +208,23 @@ class PlanningRepair:
                 preferred_area=repaired_day.primary_area,
                 preferred_candidates=resolved_candidates,
                 override_notes=list(repaired_day.notes),
+                occupied_titles=occupied_titles,
             )
 
         for day_index in self._collect_target_days(state, repair_tasks):
             if day_index not in rebuilt_days:
                 base_day = day_map.get(day_index)
                 relevant_tasks = [task for task in repair_tasks if task.day_index in (None, day_index)]
-                rebuilt_days[day_index] = self._rebuild_day_plan(state, day_index, relevant_tasks, base_day)
+                occupied_titles = {
+                    block.title
+                    for other_index, other_day in day_map.items()
+                    if other_index != day_index
+                    for block in other_day.time_blocks
+                    if block.item_type == "attraction"
+                }
+                rebuilt_days[day_index] = self._rebuild_day_plan(
+                    state, day_index, relevant_tasks, base_day, occupied_titles=occupied_titles
+                )
 
         for idx, day in rebuilt_days.items():
             day_map[idx] = day
@@ -202,6 +247,7 @@ class PlanningRepair:
         preferred_area: str | None = None,
         preferred_candidates: list[AttractionCandidate] | None = None,
         override_notes: list[str] | None = None,
+        occupied_titles: set[str] | None = None,
     ) -> ItineraryDayPlan:
         request = state.request
         candidates = list(state.attraction_result.candidates if state.attraction_result else [])
@@ -213,11 +259,24 @@ class PlanningRepair:
         remove_titles = {title for task in tasks for title in task.remove_titles}
         chosen_area = preferred_area or next((task.preferred_area for task in tasks if task.preferred_area), None) or (base_day.primary_area if base_day else None) or request.destination
 
+        # 跨天去重：重建本天时避开其它天已安排的景点（must_keep 优先保留除外），
+        # 让定向重建天然维护跨天不变式，减少合并后去重的副作用
+        if occupied_titles is None:
+            occupied_titles = {
+                block.title
+                for day in (state.draft.day_plans if state.draft else [])
+                if day.day_index != day_index
+                for block in day.time_blocks
+                if block.item_type == "attraction"
+            }
+
         selected: list[AttractionCandidate] = []
         pool = preferred_candidates if preferred_candidates is not None else candidates
 
         def can_use(candidate: AttractionCandidate) -> bool:
             if candidate.name in remove_titles:
+                return False
+            if candidate.name in occupied_titles and candidate.name not in must_keep:
                 return False
             if any(avoid and (avoid in candidate.name or (candidate.reason and avoid in candidate.reason)) for avoid in request.avoid_spots):
                 return False
@@ -230,9 +289,9 @@ class PlanningRepair:
 
         same_area = [candidate for candidate in pool if can_use(candidate) and (candidate.area == chosen_area or not candidate.area)]
         adjacent = [candidate for candidate in pool if can_use(candidate) and candidate.area != chosen_area]
-        ranked_pool = same_area + adjacent
 
-        for candidate in ranked_pool:
+        # 优先填主区域候选；主区域候选不足 2 个时才跨区补充，避免强凑跨区景点引发 area_inconsistency
+        for candidate in same_area:
             if candidate.name in {item.name for item in selected}:
                 continue
             if any(keyword in weather for keyword in ["雷阵雨", "暴雨", "阵雨"]) and any(token in (candidate.name + (candidate.reason or "")) for token in ["长城", "公园", "广场", "胡同"]) and len(selected) >= 1:
@@ -240,6 +299,16 @@ class PlanningRepair:
             selected.append(candidate)
             if len(selected) >= 3:
                 break
+
+        if len(selected) < 2:
+            for candidate in adjacent:
+                if candidate.name in {item.name for item in selected}:
+                    continue
+                if any(keyword in weather for keyword in ["雷阵雨", "暴雨", "阵雨"]) and any(token in (candidate.name + (candidate.reason or "")) for token in ["长城", "公园", "广场", "胡同"]) and len(selected) >= 1:
+                    continue
+                selected.append(candidate)
+                if len(selected) >= 3:
+                    break
 
         if not selected and pool:
             selected.append(pool[0])
@@ -310,6 +379,8 @@ class PlanningRepair:
         if any(task.action == "fill_day" for task in tasks):
             notes.append("已补强当日节奏，加入轻量文化节点或弹性休整段。")
 
+        # 统一按开始时间排序，保证重建结果时间递增，避免触发 unordered_time_block
+        blocks.sort(key=lambda block: block.start_time)
         return ItineraryDayPlan(
             day_index=day_index,
             primary_area=chosen_area,

@@ -376,7 +376,7 @@ class TravelOrchestrator:
         request_id: str,
         raw_message: str,
         max_attempts: int = 3,
-    ) -> tuple[SessionState, SessionIntentResult, dict, tuple | None]:
+    ) -> tuple[SessionState, SessionIntentResult, dict, list, tuple | None]:
         # 空输入防护：不识别不调 LLM，直接 unknown 兜底（与 pipeline.run 口径一致；
         # 否则 build_intent_input 会对空 raw_message 触发 IntentRecognitionInput 校验异常）
         if not (raw_message or "").strip():
@@ -446,7 +446,7 @@ class TravelOrchestrator:
             saved = redis_session_repository.save(session_state)
             if saved is not None:
                 # 返回升版后的 state，后续分支的二次保存以此为基底，不再误判冲突
-                return saved, intent, user_context, prefetched_artifacts
+                return saved, intent, user_context, trip_history, prefetched_artifacts
             app_logger.warning(
                 "session_save_conflict",
                 request_id=request_id,

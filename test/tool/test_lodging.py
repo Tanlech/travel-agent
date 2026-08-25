@@ -5,8 +5,8 @@ from pathlib import Path
 import pytest
 
 from app.infrastructure.amap_client import amap_client
-from app.tools.lodging import LodgingTool, lodging_tool
-from app.tools.schema.lodging import LodgingInput
+from app.agent.tools.lodging import LodgingTool, lodging_tool
+from app.agent.tools.schema.lodging import LodgingInput
 
 
 @pytest.fixture(autouse=True)

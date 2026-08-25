@@ -13,7 +13,7 @@ services:
       - redis
       - qdrant
     ports:
-      - "8000:8000"
+      - "8001:8001"
     volumes:
       - .:/app
     networks:
@@ -38,10 +38,26 @@ services:
       - qdrant_storage:/qdrant/storage
     networks:
       - travel-agent-net
+  # 用户账号体系（用户管理 / 登录令牌）
+  mysql:
+    image: mysql:8.0
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: travel_agent
+      MYSQL_USER: travel
+      MYSQL_PASSWORD: travel
+    command: ["--default-authentication-plugin=mysql_native_password"]
+    volumes:
+      - travel_agent_mysql_data:/var/lib/mysql
+    networks:
+      - travel-agent-net
 
 volumes:
   travel_agent_redis_data:
   qdrant_storage:
+  travel_agent_mysql_data:
 
 networks:
   travel-agent-net:

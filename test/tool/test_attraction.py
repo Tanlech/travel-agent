@@ -8,8 +8,8 @@ import json
 
 import pytest
 
-from app.tools.attraction import attraction_tool
-from app.tools.schema.attraction import AttractionCandidate, AttractionInput
+from app.agent.tools.attraction import attraction_tool
+from app.agent.tools.schema.attraction import AttractionCandidate, AttractionInput
 
 
 def _quality_summary(result, must_spots=None, avoid_spots=None) -> dict:

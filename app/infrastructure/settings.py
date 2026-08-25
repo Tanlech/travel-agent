@@ -27,6 +27,19 @@ class Settings(BaseSettings):
     redis_url: str | None = None
     redis_ttl_seconds: int = 86400
 
+    # MySQL（用户账号体系：用户/令牌；偏好与会话仍在 Redis）
+    mysql_host: str = "localhost"
+    mysql_port: int = 3306
+    mysql_user: str = "travel"
+    mysql_password: str = "travel"
+    mysql_database: str = "travel_agent"
+    mysql_pool_size: int = 5
+
+    # 用户账号体系（注册/登录/管理后台）
+    auth_token_ttl_seconds: int = 604800  # 登录令牌有效期（默认 7 天）
+    admin_seed_username: str = "admin"  # 首次启动时若该账号不存在则创建为管理员
+    admin_seed_password: str | None = None  # 为空则不自动创建管理员账号
+
     # RAG 知识库（向量检索）
     embedding_model: str = "qwen3.7-text-embedding"  # 阿里云 Qwen-Embedding（1024 维），可切换 text-embedding-v3/v4
     embedding_dim: int = 1024

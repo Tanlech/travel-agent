@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 
 from app.infrastructure.qweather_client import qweather_client
-from app.tools.schema.weather import WeatherInput
-from app.tools.weather import weather_tool
+from app.agent.tools.schema.weather import WeatherInput
+from app.agent.tools.weather import weather_tool
 
 
 @pytest.fixture(autouse=True)

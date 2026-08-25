@@ -1,9 +1,9 @@
 """memory 层融合逻辑测试（使用 InMemoryStore 注入，不依赖 Redis）。"""
 
-from app.agents.schema.planning import PlanningRequest
-from app.domain.memory.manager import MAX_PREFERENCE_ITEMS, MemoryManager, _normalize_preference, _parse_preference_item
-from app.domain.memory.schema import TripMemory, UserMemory
-from app.domain.memory.store import InMemoryStore, MAX_TRIP_MEMORIES, RedisMemoryStore
+from app.agent.agents.schema.planning import PlanningRequest
+from app.agent.domain.memory.manager import MAX_PREFERENCE_ITEMS, MemoryManager, _normalize_preference, _parse_preference_item
+from app.agent.domain.memory.schema import TripMemory, UserMemory
+from app.agent.domain.memory.store import InMemoryStore, MAX_TRIP_MEMORIES, RedisMemoryStore
 from app.infrastructure.settings import settings
 
 

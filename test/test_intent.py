@@ -6,12 +6,13 @@
 
 import pytest
 
-from app.domain.intent.schema import (
+from app.agent.domain.intent.schema import (
+    IntentPlanningRequest,
     IntentRecognitionInput,
     IntentRecognitionOutput,
     IntentType,
 )
-from app.domain.intent.service import (
+from app.agent.domain.intent.service import (
     IntentRecognizer,
     extract_dates,
     extract_destination,
@@ -62,9 +63,10 @@ def test_qa():
 
 
 def test_clarification_missing_fields():
+    # 只有目的地必填，日期可选；"我想去北京玩" 已含目的地 → 应直接规划
     out = recognizer.recognize(_input("我想去北京玩"))
-    assert out.intent_type == IntentType.CLARIFICATION
-    assert {"start_date", "end_date"} <= set(out.missing_fields)
+    assert out.intent_type == IntentType.NEW_PLAN
+    assert out.missing_fields == []
 
 
 def test_new_plan_complete():
@@ -125,3 +127,63 @@ def test_patch_whitelist_and_float_int():
     assert "unknown_field" not in out.extracted_request_patch
     assert out.extracted_request_patch.get("days") == 3
     assert out.patch_dropped_fields == ["unknown_field"]
+
+
+# ---- qa 意图保留闲聊中透露的规划字段（目的地累计，避免后续规划忘记重新追问） ----
+
+def test_qa_keeps_mentioned_destination_in_patch():
+    # "我想去阳江，有什么好玩的吗" 判为 qa，但原话明确提到目的地 → patch 必须保留
+    out = IntentRecognitionOutput(
+        intent_type="qa",
+        extracted_request_patch={"destination": "阳江"},
+        missing_fields=["destination"],
+    )
+    assert out.extracted_request_patch.get("destination") == "阳江"
+    assert out.missing_fields == []  # qa 不驱动追问
+
+
+def test_conversational_intents_clear_patch():
+    # 收尾类意图仍清空 patch，避免"谢谢/再见"等污染累计需求
+    for it in ("confirm", "reject", "end_session", "unknown"):
+        out = IntentRecognitionOutput(intent_type=it, extracted_request_patch={"destination": "北京"})
+        assert out.extracted_request_patch == {}
+
+
+def test_qa_guard_keeps_destination_when_none_confirmed():
+    inp = _input("我想去阳江，有什么好玩的吗")
+    out = IntentRecognitionOutput(intent_type="qa", extracted_request_patch={"destination": "阳江"})
+    guarded = recognizer._guard_qa_patch(inp, out)
+    assert guarded.extracted_request_patch == {"destination": "阳江"}
+
+
+def test_qa_guard_does_not_overwrite_confirmed_destination():
+    # 已确认目的地（北京）后，闲聊随口提到另一地点不得覆盖
+    inp = _input("上海有什么好吃的？", planning_request=IntentPlanningRequest(destination="北京"))
+    out = IntentRecognitionOutput(intent_type="qa", extracted_request_patch={"destination": "上海"})
+    guarded = recognizer._guard_qa_patch(inp, out)
+    assert guarded.extracted_request_patch == {}
+
+
+def test_qa_mention_destination_then_plan_no_reask(monkeypatch):
+    """端到端：闲聊透露目的地（判 qa）→ 再要 3 天行程，不应再追问目的地"""
+    from app.agent.domain.session.pipeline import intent_session_pipeline
+    from app.agent.domain.session.schema import SessionState
+
+    responses = iter(
+        [
+            IntentRecognitionOutput(intent_type="qa", extracted_request_patch={"destination": "阳江"}),
+            IntentRecognitionOutput(intent_type="new_plan", extracted_request_patch={"days": 3}),
+        ]
+    )
+    monkeypatch.setattr(IntentRecognizer, "_recognize_with_llm", lambda self, intent_input: next(responses))
+
+    state = SessionState(session_id="s1")
+
+    r1 = intent_session_pipeline.run(session_state=state, request_id="r1", raw_message="我想去阳江，有什么好玩的地方吗")
+    assert r1.session_state.current_request_state.destination == "阳江"
+
+    r2 = intent_session_pipeline.run(session_state=r1.session_state, request_id="r2", raw_message="给我一个三天的旅行呗")
+    assert r2.session_state.current_request_state.destination == "阳江"
+    assert r2.session_state.current_request_state.days == 3
+    assert "destination" not in r2.merge_result.remaining_missing_fields
+    assert r2.session_state.conversation_stage == "ready_to_plan"

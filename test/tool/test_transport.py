@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 
 from app.infrastructure.amap_client import amap_client
-from app.tools.schema.transport import TransitRouteStep, TransportInput
-from app.tools.transport import TransportTool, transport_tool
+from app.agent.tools.schema.transport import TransitRouteStep, TransportInput
+from app.agent.tools.transport import TransportTool, transport_tool
 
 
 @pytest.fixture(autouse=True)
@@ -201,7 +201,7 @@ def test_choose_best_transit_option_prefers_shortest_duration():
         {"duration_minutes": 40, "walking_distance_meters": 300, "transfer_count": 1, "cost": 5.0},
     ]
     # 直接构造 schema 对象避免依赖 _summarize_transit_option
-    from app.tools.schema.transport import TransitOptionSummary
+    from app.agent.tools.schema.transport import TransitOptionSummary
 
     option_models = [TransitOptionSummary(**item) for item in options]
     best = tool._choose_best_transit_option(option_models)

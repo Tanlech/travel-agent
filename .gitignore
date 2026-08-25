@@ -6,9 +6,15 @@ __pycache__/
 .venv/
 envs/
 
+# 本地依赖（沙箱环境无法写入 conda 环境时，pymysql 等装入此目录）
+vendor/
+
 # 环境与密钥（真实值用环境变量注入，勿提交）
 .env
 .env.local
+
+# 本机工具链（前端构建用的本地 Node 安装，勿提交）
+.node/
 
 # IDE
 .idea/

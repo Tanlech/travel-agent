@@ -8,11 +8,11 @@ from typing import Any
 from openai import AuthenticationError, OpenAI
 from pydantic import ValidationError
 
-from app.agents.schema.planning import ClusterPlanning, LodgingFitnessResult, PlanningSkeleton
-from app.agents.schema.repair import RepairProposalSchema
-from app.agents.schema.revise import BlockLevelReviseResultSchema, DayLevelReviseResultSchema, RevisionIntent
-from app.domain.common.itinerary import ItineraryDraftSchema
-from app.domain.intent.schema import IntentRecognitionOutput
+from app.agent.agents.schema.planning import ClusterPlanning, LodgingFitnessResult, PlanningSkeleton
+from app.agent.agents.schema.repair import RepairProposalSchema
+from app.agent.agents.schema.revise import BlockLevelReviseResultSchema, DayLevelReviseResultSchema, RevisionIntent
+from app.agent.domain.common.itinerary import ItineraryDraftSchema
+from app.agent.domain.intent.schema import IntentRecognitionOutput
 from app.infrastructure.settings import settings
 
 
@@ -182,17 +182,18 @@ class LLMClient:
     # 自由文本对话：用于 qa 分支的正常 AI 回复
     # 与 _generate_structured 的区别：不强制 JSON，不重试解析，直接返回纯文本
     # LLM 不可用/报错/空回复时返回 None，由调用方降级
-    def generate_chat_reply(self, *, system_prompt: str, user_prompt: str) -> str | None:
+    def generate_chat_reply(self, *, system_prompt: str, user_prompt: str, history: list[dict] | None = None) -> str | None:
         if not self._ensure_enabled():
             return None
         try:
+            messages: list[dict] = [{"role": "system", "content": system_prompt}]
+            if history:
+                messages.extend(history)
+            messages.append({"role": "user", "content": user_prompt})
             response = self.client.chat.completions.create(
                 model=self.model,
                 temperature=self.temperature,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
+                messages=messages,
             )
         except Exception as exc:
             self.last_debug_info = {

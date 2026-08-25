@@ -7,10 +7,10 @@
 
 import pytest
 
-from app.knowledge import knowledge_service
-from app.knowledge.chunker import chunk_document_structured, chunk_text
-from app.tools.attraction import attraction_tool
-from app.tools.schema.attraction import AttractionInput
+from app.agent.knowledge import knowledge_service
+from app.agent.knowledge.chunker import chunk_document_structured, chunk_text
+from app.agent.tools.attraction import attraction_tool
+from app.agent.tools.schema.attraction import AttractionInput
 
 TEST_COLLECTION = "test_knowledge"
 TEST_CITY = "知识测试城"
@@ -140,8 +140,8 @@ def test_ask():
 @pytest.mark.integration
 def test_attraction_tool_kb_hit(monkeypatch):
     """知识库命中：attraction_tool 直接返回知识库结果（不依赖高德/LLM）"""
-    from app.knowledge import ATTRACTION_COLLECTION
-    from app.tools.schema.attraction import SpotSelection
+    from app.agent.knowledge import ATTRACTION_COLLECTION
+    from app.agent.tools.schema.attraction import SpotSelection
 
     city = TEST_CITY
     kb_entries = [

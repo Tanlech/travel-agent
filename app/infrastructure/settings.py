@@ -62,7 +62,7 @@ class Settings(BaseSettings):
     # 双开关等效：enable_mock_llm=true 或 llm_provider="mock" 任一命中即禁用 LLM（走规则路径）
     enable_mock_llm: bool = True
 
-    # attraction_tool 自动沉淀：搜索确认的主要景点写回城市 json 并重导 Qdrant
+    # attraction_tool 自动沉淀：搜索确认的主要景点写回城市 json 并单点同步到 Qdrant
     attraction_persist_enabled: bool = True
 
     model_config = SettingsConfigDict(

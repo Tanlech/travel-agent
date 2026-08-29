@@ -29,6 +29,9 @@ from app.agent.domain.session.repository import redis_session_repository
 from app.agent.domain.session.schema import SessionIntentResult, SessionState
 from app.agent.domain.session.service import session_state_service
 from app.agent.domain.common.itinerary import ItineraryDraftSchema
+from app.agent.knowledge import ATTRACTION_COLLECTION, knowledge_service
+from app.agent.knowledge.ingest.common import CHAT_COLLECTION, QA_COLLECTION
+from app.agent.knowledge.schemas import RetrievalItem
 from app.infrastructure.llm_client import get_llm_client
 from app.observability.monitoring import app_logger, metrics_recorder
 from app.observability.tracing import new_trace_id
@@ -653,12 +656,55 @@ class TravelOrchestrator:
         if history and history[-1]["role"] == "user" and history[-1]["content"] == user_message:
             history.pop()
 
+        # 对话问答时从知识库综合检索相关知识，作为参考资料注入，引导 AI 输出更好内容
+        # （仅检索不回写；检索失败/为空时不影响本次自由回答）
+        ref_context = self._retrieve_kb_context(user_message)
+        user_prompt = f"【知识参考】\n{ref_context}\n\n{user_message}" if ref_context else user_message
+
         reply = llm_client.generate_chat_reply(
             system_prompt=system_cue,
-            user_prompt=user_message,
+            user_prompt=user_prompt,
             history=history,
         )
         return reply
+
+    # 问答 RAG 检索：从问答库/景点库/对话库三处各取 top_k 相关块，轮转去重后拼成参考文本。
+    # 三库相似度并不可比，用轮转混合保证来源多样，避免某一个库分数虚高独占上下文
+    def _retrieve_kb_context(self, query: str, top_k: int = 2, max_total: int = 6) -> str:
+        pools: dict[str, list[RetrievalItem]] = {}
+        for coll in (QA_COLLECTION, ATTRACTION_COLLECTION, CHAT_COLLECTION):
+            try:
+                result = knowledge_service.retrieve(coll, query, top_k=top_k)
+                pools[coll] = list(result.items)
+            except Exception:
+                app_logger.warning("kb_retrieve_fail", collection=coll, query=query)
+
+        lines: list[str] = []
+        seen: set[str] = set()
+        # 轮转混合：依次从每个库吐出一条，未达到上限且有剩余时继续
+        while sum(len(v) for v in pools.values()) and len(lines) < max_total:
+            for coll, items in pools.items():
+                if not items:
+                    continue
+                item = items.pop(0)
+                if item.text in seen:
+                    continue
+                seen.add(item.text)
+                meta = item.metadata or {}
+                src = meta.get("source") or meta.get("city") or ""
+                label = self._kb_label(coll)
+                suffix = f"（{src}）" if src else ""
+                lines.append(f"- [{label}]{suffix} {item.text}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _kb_label(collection: str) -> str:
+        labels = {
+            QA_COLLECTION: "攻略",
+            ATTRACTION_COLLECTION: "景点",
+            CHAT_COLLECTION: "对话",
+        }
+        return labels.get(collection, collection)
 
 
 travel_orchestrator = TravelOrchestrator()

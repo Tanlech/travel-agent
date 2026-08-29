@@ -1,10 +1,15 @@
-"""RAG 景点知识库管理：定时重建 + 手动重建 + 运行状态/历史
+"""知识库管理调度器：触发/记录重建，为后台页面提供配置与运行态。
 
-- 数据源：data/attraction/*.json（与 scripts/import_attraction 一致）
-- 重建 = 逐城市 ingest_city（先清该城市旧点再整体重导，避免脏数据残留）
-- 并发保护：Redis 分布式锁，定时与手动重建互斥
+- 只负责"调度 + 运维"：重建触发锁、运行状态/历史、定时器、配置、概览统计
+- 支持「子知识库 = 单独某个库」与「总知识库 = 全部子库集合」两种重建方式：
+    - 重建任一子库只会重建它自己（清它自己的集合 + 导它自己的数据源），互不污染
+    - 「全部重建」= 依次重建每个子库，仍是各自只重建自己
+- 每个子库有独立的定时配置（开关 + 间隔），到点只重建自己
+- 子库重建职责：
+    - 景点库  attraction : attraction_kb.reindex_all，从 data/attraction 文档整库重导
+    - 问答库  qa_kb     : 清空后从 data/qa 攻略文档整库重导（可先用 guide_builder 生成）
+    - 对话库  chat_kb   : 运行时记忆库（无持久源），重建 = 清空后供运行时自动重新积累
 - 配置/状态/历史存 Redis，后台页面可实时查看与调整
-- 调度：服务启动后由独立 asyncio 后台任务每分钟检查一次到点即触发
 """
 
 from __future__ import annotations
@@ -17,35 +22,78 @@ import time
 import uuid
 from pathlib import Path
 
-from app.infrastructure.conversions import safe_float
-from app.infrastructure.redis_client import get_redis
 from app.agent.knowledge import ATTRACTION_COLLECTION, knowledge_service
-from app.agent.knowledge.embedder import sparse_text_embedder, text_embedder
-from app.agent.knowledge.ingest.attraction import ingest_city
 from app.agent.knowledge.ingest.common import CHAT_COLLECTION, QA_COLLECTION
 
 logger = logging.getLogger(__name__)
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 _CFG_KEY = "kb_admin:config"
 _STATUS_KEY = "kb_admin:status"
 _HISTORY_KEY = "kb_admin:history"
 _LOCK_KEY = "kb_admin:lock"
-_LOCK_TTL_SECONDS = 3600
-_HISTORY_LIMIT = 20
+_LAST_PREFIX = "kb_admin:last:"
+_LOCK_TTL_SECONDS = 7200
+_HISTORY_LIMIT = 30
 _DEFAULT_INTERVAL_MINUTES = 1440  # 默认每天重建一次
 
-_DATA_DIR = Path(__file__).resolve().parents[3] / "data" / "attraction"
 
-# 全部知识库类型注册表：后台据此区分多个知识库
-_KB_TYPES = [
-    {"collection": ATTRACTION_COLLECTION, "label": "景点知识库", "desc": "城市景点 RAG（可按地点管理景点）"},
-    {"collection": QA_COLLECTION, "label": "问答知识库", "desc": "QA 知识问答库"},
-    {"collection": CHAT_COLLECTION, "label": "对话知识库", "desc": "多轮对话记忆库"},
-]
+def _rebuild_qa() -> tuple[dict, int]:
+    """问答库整库重建：清空 qa_kb 后从 data/qa 攻略文档重导（只动自己）"""
+    qa_dir = _PROJECT_ROOT / "data" / "qa"
+    if not qa_dir.exists():
+        return {"note": "data/qa 目录不存在，可先运行 guide_builder 生成攻略"}, 0
+    knowledge_service.clear(QA_COLLECTION)
+    n = knowledge_service.ingest_documents(QA_COLLECTION, [str(qa_dir)])
+    return {"note": "data/qa 攻略文档已重导"}, n
+
+
+def _rebuild_chat() -> tuple[dict, int]:
+    """对话库整库重建：运行时记忆库，清空后由后续对话自动重新积累（只动自己）"""
+    knowledge_service.clear(CHAT_COLLECTION)
+    return {"note": "对话库已清空，后续对话将自动重新积累"}, 0
+
+
+def _rebuild_attraction() -> tuple[dict, int]:
+    """景点库整库重建：逐城市从 data/attraction 文档整体重导（只动自己）"""
+    from app.agent.knowledge.attraction_kb import reindex_all
+
+    return reindex_all()
+
+
+# 全部可重建子库注册表：collection -> 元信息 + 专属重建函数
+_KB_PROFILES: dict[str, dict] = {
+    ATTRACTION_COLLECTION: {
+        "label": "景点知识库",
+        "icon": "🧭",
+        "desc": "城市景点 RAG：从 data/attraction 文档整库重导",
+        "builder": _rebuild_attraction,
+    },
+    QA_COLLECTION: {
+        "label": "城市攻略知识库",
+        "icon": "💬",
+        "desc": "城市攻略库：从 data/qa 攻略文档整库重导",
+        "builder": _rebuild_qa,
+    },
+    CHAT_COLLECTION: {
+        "label": "对话知识库",
+        "icon": "🧠",
+        "desc": "多轮对话记忆库（运行时数据）：重建将清空后重新积累",
+        "builder": _rebuild_chat,
+    },
+}
+
+
+def _default_bases_config() -> dict:
+    return {
+        coll: {"enabled": False, "interval_minutes": _DEFAULT_INTERVAL_MINUTES}
+        for coll in _KB_PROFILES
+    }
 
 
 class KnowledgeAdminManager:
-    """景点知识库的定时/手动重建与运行态管理。"""
+    """知识库定时/手动调度与运行态管理（支持按子库独立重建与独立定时）。"""
 
     def __init__(self) -> None:
         self._task: asyncio.Task | None = None
@@ -53,6 +101,8 @@ class KnowledgeAdminManager:
     # ---------- Redis 辅助 ----------
     @staticmethod
     def _r():
+        from app.infrastructure.redis_client import get_redis
+
         return get_redis()
 
     # ---------- 配置 ----------
@@ -62,18 +112,35 @@ class KnowledgeAdminManager:
             cfg = json.loads(raw) if raw else {}
         except Exception:
             cfg = {}
-        return {
-            "enabled": bool(cfg.get("enabled")),
-            "interval_minutes": int(cfg.get("interval_minutes") or _DEFAULT_INTERVAL_MINUTES),
-            "updated_at": cfg.get("updated_at") or "",
-        }
+        bases = _default_bases_config()
+        for coll, bc in (cfg.get("bases") or {}).items():
+            if coll in bases:
+                bases[coll] = {
+                    "enabled": bool(bc.get("enabled")),
+                    "interval_minutes": max(1, int(bc.get("interval_minutes") or _DEFAULT_INTERVAL_MINUTES)),
+                }
+        return {"bases": bases, "updated_at": cfg.get("updated_at") or ""}
 
-    def update_config(self, enabled: bool | None = None, interval_minutes: int | None = None) -> dict:
+    def update_config(self, bases: dict | None = None, enabled: bool | None = None, interval_minutes: int | None = None) -> dict:
+        """更新定时配置。bases 形如 {collection: {enabled, interval_minutes}}；
+        enabled / interval_minutes 为旧版全局参数，传入时将应用到全部子库。"""
         cfg = self.get_config()
+        target = bases or {}
         if enabled is not None:
-            cfg["enabled"] = bool(enabled)
+            for coll in cfg["bases"]:
+                target.setdefault(coll, {})["enabled"] = bool(enabled)
         if interval_minutes is not None:
-            cfg["interval_minutes"] = max(1, int(interval_minutes))
+            for coll in cfg["bases"]:
+                target.setdefault(coll, {})["interval_minutes"] = max(1, int(interval_minutes))
+        for coll, bc in target.items():
+            if coll not in cfg["bases"]:
+                continue
+            merged = dict(cfg["bases"][coll])
+            if "enabled" in bc:
+                merged["enabled"] = bool(bc["enabled"])
+            if "interval_minutes" in bc:
+                merged["interval_minutes"] = max(1, int(bc["interval_minutes"]))
+            cfg["bases"][coll] = merged
         cfg["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
         self._r().set(_CFG_KEY, json.dumps(cfg, ensure_ascii=False))
         return cfg
@@ -91,6 +158,18 @@ class KnowledgeAdminManager:
         status.update(fields)
         self._r().set(_STATUS_KEY, json.dumps(status, ensure_ascii=False))
 
+    def _last_for(self, collection: str) -> dict:
+        try:
+            raw = self._r().get(_LAST_PREFIX + collection)
+            return json.loads(raw) if raw else {}
+        except Exception:
+            return {}
+
+    def _set_last(self, collection: str, **fields: object) -> None:
+        last = self._last_for(collection)
+        last.update(fields)
+        self._r().set(_LAST_PREFIX + collection, json.dumps(last, ensure_ascii=False))
+
     def get_history(self) -> list[dict]:
         history: list[dict] = []
         for item in self._r().lrange(_HISTORY_KEY, 0, _HISTORY_LIMIT - 1) or []:
@@ -105,85 +184,9 @@ class KnowledgeAdminManager:
         r.lpush(_HISTORY_KEY, json.dumps(entry, ensure_ascii=False))
         r.ltrim(_HISTORY_KEY, 0, _HISTORY_LIMIT - 1)
 
-    # ---------- 重建触发 ----------
-    def run_now(self, trigger: str = "manual") -> dict:
-        """触发一次知识库重建；已有任务在运行则跳过。返回 {started, message}"""
-        run_id = uuid.uuid4().hex
-        acquired = self._r().set(_LOCK_KEY, run_id, nx=True, ex=_LOCK_TTL_SECONDS)
-        if not acquired:
-            return {"started": False, "message": "已有重建任务正在运行，请稍候"}
-        self._set_status(
-            state="running",
-            trigger=trigger,
-            started_at=time.time(),
-            finished_at=None,
-            duration_ms=None,
-            total=0,
-            cities={},
-            error=None,
-        )
-        logger.info("kb reindex start trigger=%s run_id=%s", trigger, run_id)
-        thread = threading.Thread(target=self._worker, args=(run_id, trigger), daemon=True)
-        thread.start()
-        return {"started": True, "message": "知识库重建已启动"}
-
-    def _worker(self, run_id: str, trigger: str) -> None:
-        """同步重建工作线程：逐城市重导并记录结果（独立线程避免阻塞事件循环）"""
-        started = time.time()
-        cities: dict[str, int] = {}
-        total = 0
-        state = "success"
-        error: str | None = None
-        try:
-            doc_paths = self._find_doc_paths()
-            if not doc_paths:
-                raise RuntimeError("未找到景点文档（data/attraction/*.json）")
-            for path in doc_paths:
-                try:
-                    doc = json.loads(path.read_text(encoding="utf-8"))
-                except Exception as exc:
-                    logger.warning("kb reindex parse fail path=%s err=%s", path, exc)
-                    continue
-                city = str(doc.get("city") or "").strip() or path.stem
-                count = ingest_city(
-                    city,
-                    doc.get("spots", []),
-                    province=str(doc.get("province") or "").strip(),
-                )
-                if count:
-                    cities[city] = count
-                    total += count
-        except Exception as exc:
-            logger.exception("kb reindex failed run_id=%s", run_id)
-            state = "failed"
-            error = str(exc)
-        finally:
-            duration_ms = int((time.time() - started) * 1000)
-            self._set_status(
-                state=state,
-                finished_at=time.time(),
-                duration_ms=duration_ms,
-                total=total,
-                cities=cities,
-                error=error,
-            )
-            self._push_history(
-                {
-                    "trigger": trigger,
-                    "state": state,
-                    "started_at": started,
-                    "finished_at": time.time(),
-                    "duration_ms": duration_ms,
-                    "total": total,
-                    "cities_count": len(cities),
-                    "error": error,
-                }
-            )
-            self._r().delete(_LOCK_KEY)
-
     # ---------- 统计 ----------
     def get_stats(self) -> dict:
-        """集合总点数 + 分城市点数 + 稠密/稀疏向量可用状态"""
+        """景点集合总点数 + 分城市点数 + 稠密/稀疏向量可用状态"""
         by_city: dict[str, int] = {}
         total = 0
         try:
@@ -197,91 +200,129 @@ class KnowledgeAdminManager:
             "collection": ATTRACTION_COLLECTION,
             "total": total,
             "cities": dict(sorted(by_city.items(), key=lambda kv: kv[1], reverse=True)),
-            "dense_enabled": bool(text_embedder.is_enabled()),
-            "sparse_enabled": bool(sparse_text_embedder.is_enabled()),
+            "dense_enabled": bool(getattr(knowledge_service, "dense_enabled", True)),
+            "sparse_enabled": bool(getattr(knowledge_service, "sparse_enabled", True)),
         }
 
-    # ---------- 知识库类型 / 地点 / 景点 CRUD ----------
+    # ---------- 知识库类型 ----------
     def get_bases(self) -> list[dict]:
-        """列出全部知识库类型及其数据量，供后台区分多种数据库"""
+        """列出全部可重建子库：元信息 + 数据量 + 各自定时配置 + 最近一次重建结果"""
+        cfg = self.get_config()["bases"]
         bases: list[dict] = []
-        for kb in _KB_TYPES:
+        for coll, prof in _KB_PROFILES.items():
             count = 0
             try:
-                count = knowledge_service.count(kb["collection"])
+                count = knowledge_service.count(coll)
             except Exception as exc:
-                logger.warning("kb base count fail %s: %s", kb["collection"], exc)
-            bases.append({**kb, "count": count})
+                logger.warning("kb base count fail %s: %s", coll, exc)
+            bc = cfg.get(coll, {})
+            last = self._last_for(coll)
+            bases.append(
+                {
+                    "collection": coll,
+                    "label": prof["label"],
+                    "icon": prof["icon"],
+                    "desc": prof["desc"],
+                    "count": count,
+                    "enabled": bool(bc.get("enabled")),
+                    "interval_minutes": bc.get("interval_minutes", _DEFAULT_INTERVAL_MINUTES),
+                    "last": last,
+                }
+            )
         return bases
 
-    def list_cities(self) -> list[dict]:
-        """按地点聚合景点数量与省份（景点知识库）"""
-        by_city: dict[str, dict] = {}
-        try:
-            for item in knowledge_service.get_all(ATTRACTION_COLLECTION):
-                meta = item.metadata or {}
-                city = str(meta.get("city") or "未知").strip()
-                info = by_city.setdefault(city, {"city": city, "province": "", "count": 0})
-                info["count"] += 1
-                province = str(meta.get("province") or "").strip()
-                if province and not info["province"]:
-                    info["province"] = province
-        except Exception as exc:
-            logger.warning("kb list cities failed: %s", exc)
-        return sorted(by_city.values(), key=lambda c: c["count"], reverse=True)
+    # ---------- 重建触发 ----------
+    def run_now(self, target: str | list[str] | None = None, trigger: str = "manual") -> dict:
+        """立即重建。target 为单个子库 collection、子库 collection 列表；None 表示全部子库。
+        每个子库只会重建自己；已有重建任务在运行则跳过。返回 {started, bases, skipped_bases, message}"""
+        if target is None:
+            bases = list(_KB_PROFILES.keys())
+        elif isinstance(target, (list, tuple)):
+            bases = [c for c in target if c in _KB_PROFILES]
+        else:
+            bases = [target] if target in _KB_PROFILES else []
 
-    def list_spots(self, city: str) -> list[dict]:
-        """查询某地点下包含的全部景点"""
-        city = str(city or "").strip()
-        spots: list[dict] = []
-        if not city:
-            return spots
-        try:
-            for item in knowledge_service.get_all(ATTRACTION_COLLECTION, where={"city": city}):
-                meta = item.metadata or {}
-                spots.append(
-                    {
-                        "name": str(meta.get("name") or "").strip(),
-                        "area": str(meta.get("area") or "").strip(),
-                        "duration": safe_float(meta.get("duration")),
-                        "tags": [t for t in str(meta.get("tags") or "").split(",") if t],
-                        "reason": str(meta.get("reason") or "").strip(),
-                    }
-                )
-        except Exception as exc:
-            logger.warning("kb list spots fail %s: %s", city, exc)
-        spots.sort(key=lambda s: s["name"])
-        return spots
-
-    def create_spot(self, data: dict) -> bool:
-        """在某地点新建景点（写 json + 整体重导）；重名/缺字段返回 False"""
-        from app.agent.knowledge.ingest.attraction import add_spot
-
-        city = str(data.get("city") or "").strip()
-        name = str(data.get("name") or "").strip()
-        if not city or not name:
-            return False
-        return add_spot(
-            city,
-            {
-                "name": name,
-                "area": str(data.get("area") or "").strip() or city,
-                "estimated_visit_duration_hours": safe_float(data.get("duration")) or 2.0,
-                "reason": str(data.get("reason") or "").strip(),
-                "tags": [str(t).strip() for t in (data.get("tags") or []) if str(t).strip()],
-            },
-            province=str(data.get("province") or "").strip(),
+        if not bases:
+            return {"started": False, "bases": [], "skipped_bases": [], "message": "没有可重建的知识库"}
+        run_id = uuid.uuid4().hex
+        acquired = self._r().set(_LOCK_KEY, run_id, nx=True, ex=_LOCK_TTL_SECONDS)
+        if not acquired:
+            return {"started": False, "bases": bases, "skipped_bases": bases, "message": "已有重建任务正在运行，请稍候"}
+        labels = [_KB_PROFILES[c]["label"] for c in bases]
+        self._set_status(
+            state="running",
+            trigger=trigger,
+            started_at=time.time(),
+            finished_at=None,
+            duration_ms=None,
+            total=0,
+            error=None,
+            bases={c: {"state": "running", "total": 0, "error": None, "detail": {}} for c in bases},
         )
+        logger.info("kb rebuild start trigger=%s run_id=%s bases=%s", trigger, run_id, labels)
+        thread = threading.Thread(target=self._worker, args=(run_id, trigger, bases), daemon=True)
+        thread.start()
+        return {"started": True, "bases": bases, "skipped_bases": [], "message": f"{('、'.join(labels)) or '知识库'} 重建已启动"}
 
-    def delete_spot(self, city: str, name: str) -> bool:
-        from app.agent.knowledge.ingest.attraction import remove_spot
-
-        return remove_spot(str(city or "").strip(), str(name or "").strip())
-
-    def delete_city(self, city: str) -> bool:
-        from app.agent.knowledge.ingest.attraction import remove_city
-
-        return remove_city(str(city or "").strip())
+    def _worker(self, run_id: str, trigger: str, bases: list[str]) -> None:
+        """后台线程：顺序重建目标列表中的每个子库（每个子库只重建自己）"""
+        started = time.time()
+        total = 0
+        results: dict[str, dict] = {}
+        overall_error: str | None = None
+        failed = False
+        for coll in bases:
+            prof = _KB_PROFILES.get(coll)
+            if not prof:
+                continue
+            state = "success"
+            error: str | None = None
+            count = 0
+            detail: dict = {}
+            try:
+                detail, count = prof["builder"]()
+            except Exception as exc:
+                logger.exception("kb rebuild failed coll=%s run_id=%s", coll, run_id)
+                state = "failed"
+                error = str(exc)
+                failed = True
+            finally:
+                total += count
+                results[coll] = {"state": state, "total": count, "error": error, "detail": detail}
+                self._set_last(
+                    coll,
+                    state=state,
+                    total=count,
+                    error=error,
+                    started_at=started,
+                    finished_at=time.time(),
+                    trigger=trigger,
+                )
+        duration_ms = int((time.time() - started) * 1000)
+        overall_state = "failed" if failed else "success"
+        if failed:
+            overall_error = "部分子库重建失败"
+        self._set_status(
+            state=overall_state,
+            finished_at=time.time(),
+            duration_ms=duration_ms,
+            total=total,
+            error=overall_error,
+            bases=results,
+        )
+        self._push_history(
+            {
+                "trigger": trigger,
+                "state": overall_state,
+                "started_at": started,
+                "finished_at": time.time(),
+                "duration_ms": duration_ms,
+                "total": total,
+                "bases": results,
+                "error": overall_error,
+            }
+        )
+        self._r().delete(_LOCK_KEY)
 
     # ---------- 定时调度 ----------
     async def start(self) -> None:
@@ -303,25 +344,21 @@ class KnowledgeAdminManager:
             await asyncio.sleep(60)
 
     def _maybe_trigger_scheduled(self) -> None:
-        cfg = self.get_config()
-        if not cfg.get("enabled"):
-            return
+        """逐子库判断是否到点：到点才把该子库加入本次重建，每个子库只重建自己"""
+        cfg = self.get_config()["bases"]
         if self.get_status().get("state") == "running":
             return
-        last = self.get_status().get("finished_at") or self.get_status().get("started_at") or 0
-        interval_seconds = int(cfg.get("interval_minutes") or _DEFAULT_INTERVAL_MINUTES) * 60
-        if not last or (time.time() - last) >= interval_seconds:
-            self.run_now(trigger="schedule")
-
-    @staticmethod
-    def _find_doc_paths() -> list[Path]:
-        """识别 data/attraction/*.json 与 data/attraction/*/*.json 两种布局"""
-        if not _DATA_DIR.exists():
-            return []
-        paths = list(_DATA_DIR.glob("*.json"))
-        for sub in sorted(p for p in _DATA_DIR.iterdir() if p.is_dir()):
-            paths.extend(sub.glob("*.json"))
-        return sorted(set(paths))
+        now = time.time()
+        due: list[str] = []
+        for coll, bc in cfg.items():
+            if not bc.get("enabled"):
+                continue
+            last = self._last_for(coll).get("finished_at") or 0
+            interval = int(bc.get("interval_minutes") or _DEFAULT_INTERVAL_MINUTES) * 60
+            if not last or (now - last) >= interval:
+                due.append(coll)
+        if due:
+            self.run_now(target=due, trigger="schedule")
 
 
 kb_admin_manager = KnowledgeAdminManager()

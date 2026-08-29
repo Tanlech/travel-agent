@@ -41,6 +41,7 @@
 
         <!-- 右侧内容区 -->
         <div class="panel">
+          <div id="app-toast-host"></div>
           <div class="panel-head">
             <h2>{{ activeMenuTitle }}</h2>
           </div>
@@ -117,6 +118,18 @@
         <div class="m-body" v-html="detailHtml"></div>
       </div>
     </div>
+
+    <!-- 删除确认弹框 -->
+    <div v-if="confirmBox" class="modal-mask" @click.self="confirmBox = null">
+      <div class="modal modal-sm">
+        <div class="m-head"><h2>操作确认</h2><button class="m-close" @click="confirmBox = null">✕</button></div>
+        <div class="m-body">{{ confirmBox.text }}</div>
+        <div class="m-foot">
+          <button class="btn ghost" @click="confirmBox = null">取消</button>
+          <button class="btn danger" @click="confirmOk">确认删除</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -150,6 +163,17 @@ const fSort = ref('created_at')
 
 const detailVisible = ref(false)
 const detailHtml = ref('')
+
+// 应用内确认弹框（替代浏览器原生 confirm，避免出现 "localhost:8001 显示…" 标题）
+const confirmBox = ref(null) // { text, onOk }
+function askConfirm(text, onOk) {
+  confirmBox.value = { text, onOk }
+}
+function confirmOk() {
+  const box = confirmBox.value
+  confirmBox.value = null
+  if (box && box.onOk) box.onOk()
+}
 
 // 后台左侧功能菜单：新增模块只需往 menus 里追加一项
 const menus = [
@@ -227,7 +251,7 @@ async function loadUsers(reset = false) {
     total.value = data.total
     users.value = data.users || []
   } catch (e) {
-    if (e.message !== 'unauthorized') toast(e.message)
+    if (e.message !== 'unauthorized') toast(e.message, 'error')
   }
 }
 
@@ -254,19 +278,20 @@ async function setStatus(userId, status) {
     toast(status === 'disabled' ? '已禁用该用户' : '已启用该用户')
     loadUsers()
   } catch (e) {
-    if (e.message !== 'unauthorized') toast(e.message)
+    if (e.message !== 'unauthorized') toast(e.message, 'error')
   }
 }
 
-async function delUser(userId, username) {
-  if (!confirm('确定删除用户「' + username + '」？\n将同时删除其登录令牌、偏好记忆、历史行程和全部会话，且不可恢复。')) return
-  try {
-    const data = await adminApi('/admin/users/' + encodeURIComponent(userId), { method: 'DELETE' })
-    toast('已删除用户，清理会话 ' + data.deleted_sessions + ' 个')
-    loadUsers()
-  } catch (e) {
-    if (e.message !== 'unauthorized') toast(e.message)
-  }
+function delUser(userId, username) {
+  askConfirm(`确定删除用户「${username}」？\n将同时删除其登录令牌、偏好记忆、历史行程和全部会话，且不可恢复。`, async () => {
+    try {
+      const data = await adminApi('/admin/users/' + encodeURIComponent(userId), { method: 'DELETE' })
+      toast('已删除用户，清理会话 ' + data.deleted_sessions + ' 个')
+      loadUsers()
+    } catch (e) {
+      if (e.message !== 'unauthorized') toast(e.message, 'error')
+    }
+  })
 }
 
 async function showDetail(userId) {

@@ -56,7 +56,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+STATIC_DIR = Path(__file__).resolve().parent.parent / "frontend" / "static"
 
 
 def _spa_index() -> HTMLResponse:

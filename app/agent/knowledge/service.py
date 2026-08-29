@@ -117,6 +117,25 @@ class KnowledgeService:
         """把结构化条目（景点清单/FAQ 等）入库，text_key 为正文，其余字段作 metadata"""
         return self.ingest_chunks(collection, chunks_from_entries(entries, text_key, metadata_keys))
 
+    def upsert_entry(
+        self,
+        collection: str,
+        entry: dict,
+        text_key: str,
+        metadata_keys: tuple[str, ...] = (),
+    ) -> int:
+        """单条幂等入库：编辑/新增单个条目只同步这一条（id 稳定则覆盖）
+        供"单个景点编辑/删除"使用，避免整城重导"""
+        if not entry or not str(entry.get(text_key) or "").strip():
+            return 0
+        return self.ingest_entries(collection, [entry], text_key, metadata_keys)
+
+    def delete_entries(self, collection: str, ids: list[str]) -> None:
+        """按稳定 id 删除若干知识块（单个景点删除）；不存在的 id 自动忽略"""
+        if not ids:
+            return
+        self.store.delete_by_ids(collection, ids)
+
     # ---------- 检索 ----------
 
     def retrieve(self, collection: str, query: str, top_k: int = 5, where: dict | None = None) -> RetrievalResult:

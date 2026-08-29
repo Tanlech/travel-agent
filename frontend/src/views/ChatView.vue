@@ -3,21 +3,37 @@
     <!-- 左侧多对话栏 -->
     <aside id="sidebar" :style="{ width: sidebarWidth + 'px', minWidth: sidebarWidth + 'px' }">
       <div class="brand"><span class="logo">✈️</span><span>Travel Agent</span></div>
-      <button id="newConv" @click="newConv">＋ 新建对话</button>
+      <div class="side-actions">
+        <button id="newConv" @click="newConv">＋ 新建对话</button>
+        <button class="multi-toggle" :class="{ on: multiMode }" @click="toggleMulti">☑ 批量删除</button>
+      </div>
       <div id="convList">
         <div
           v-for="c in sorted"
           :key="c.id"
           class="conv"
-          :class="{ active: c.id === activeId }"
-          @click="switchConv(c.id)"
+          :class="{ active: c.id === activeId, sel: multiMode && multiSel[c.id] }"
+          @click="multiMode ? toggleSel(c.id) : switchConv(c.id)"
         >
+          <input
+            v-if="multiMode"
+            type="checkbox"
+            class="ck"
+            :checked="!!multiSel[c.id]"
+            @click.stop
+            @change="toggleSel(c.id, $event.target.checked)"
+          >
           <div class="meta">
             <div class="title">{{ c.title || '新对话' }}</div>
             <div class="stamp">{{ c.messages.length ? (c.messages[c.messages.length - 1].time || '') : '' }}</div>
           </div>
-          <button class="del" title="删除对话" @click.stop="delConv(c.id)">×</button>
+          <button v-if="!multiMode" class="del" title="删除对话" @click.stop="askDeleteConv(c.id)">×</button>
         </div>
+      </div>
+      <div v-if="multiMode" class="multi-bar">
+        <span class="multi-count">已选 {{ multiCount }} 个</span>
+        <div class="spacer"></div>
+        <button class="multi-del" :disabled="!multiCount" @click="batchDelete">批量删除</button>
       </div>
       <div v-if="!sorted.length" id="convEmpty">还没有对话<br>点击"新建对话"开始</div>
     </aside>
@@ -60,10 +76,11 @@
               </div>
               <PlanCard v-if="m.plan" :plan="m.plan" @show-map="planForMap = $event" />
             </div>
-            <div v-if="sending" class="msg ai">
+            <div v-if="currentSending" class="msg ai">
               <div class="loading show">
                 <span class="dot"></span><span class="dot"></span><span class="dot"></span>
                 <span>正在思考...</span>
+                <button class="stop-btn" @click="stopPending">⏹ 停止</button>
               </div>
             </div>
           </template>
@@ -86,7 +103,7 @@
               @keydown="onKeydown"
               @input="autoResize"
             ></textarea>
-            <button id="send" :disabled="sending" @click="send">发送</button>
+            <button id="send" :disabled="currentSending" @click="send">发送</button>
           </div>
         </div>
         <div class="hint">提示：规划可能需要 1-2 分钟（调用高德地图 + 大模型）。多轮对话会自动累计出行需求，每条回复会显示耗时。</div>
@@ -111,11 +128,23 @@
 
     <!-- 行程地图弹窗 -->
     <PlanMapModal v-if="planForMap" :plan="planForMap" @close="planForMap = null" />
+
+    <!-- 删除确认弹框（应用内，替代浏览器原生 confirm） -->
+    <div v-if="confirmState" class="modal-mask" @click.self="confirmState = null">
+      <div class="modal modal-sm">
+        <div class="m-head"><h2>确认删除</h2><button class="m-close" @click="confirmState = null">✕</button></div>
+        <div class="m-body">{{ confirmState.text }}</div>
+        <div class="m-foot">
+          <button class="btn ghost" @click="confirmState = null">取消</button>
+          <button class="btn danger" @click="confirmOk">确认删除</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, nextTick, watch } from 'vue'
+import { ref, computed, reactive, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { api } from '@/api'
 import { accountState, setAccount, getUserId, memoryUserId, isAdmin, accountDisplayName } from '@/store/auth'
@@ -127,18 +156,62 @@ import PlanMapModal from '@/components/PlanMapModal.vue'
 const router = useRouter()
 
 const input = ref('')
-const sending = ref(false)
 const typing = ref(null) // { id, text }
 const sidebarWidth = ref(272)
 const acctOpen = ref(false)
 const inputEl = ref(null)
 const messagesEl = ref(null)
 
+// 在途请求跟踪：conv.id -> { ctrl: AbortController, text }。
+// 请求级中止 + 按会话隔离，解决"无法中断上一个对话 / 再次发送时上一个还在运行"
+const pendingMap = reactive(new Map())
+
+// 当前会话是否正在生成（用于禁用发送按钮 / 显示"正在思考 + 停止"）
+const currentSending = computed(() => {
+  const c = currentConversation()
+  return c ? pendingMap.has(c.id) : false
+})
+
 const histVisible = ref(false)
 const histHtml = ref('')
 const memVisible = ref(false)
 const memHtml = ref('')
 const planForMap = ref(null)
+
+// 应用内确认弹框（替代浏览器原生 confirm，避免出现 "localhost:8001 显示…" 标题）
+const confirmState = ref(null) // { text, onOk }
+function askConfirm(text, onOk) {
+  confirmState.value = { text, onOk }
+}
+function confirmOk() {
+  const s = confirmState.value
+  confirmState.value = null
+  if (s && s.onOk) s.onOk()
+}
+
+// 对话栏批量删除模式
+const multiMode = ref(false)
+const multiSel = reactive({})
+const multiCount = computed(() => Object.keys(multiSel).filter((id) => multiSel[id]).length)
+function toggleMulti() {
+  multiMode.value = !multiMode.value
+  if (!multiMode.value) clearMultiSel()
+}
+function toggleSel(id, val) {
+  multiSel[id] = typeof val === 'boolean' ? val : !multiSel[id]
+}
+function clearMultiSel() {
+  Object.keys(multiSel).forEach((k) => { multiSel[k] = false })
+}
+function batchDelete() {
+  if (!multiCount.value) return
+  const ids = Object.keys(multiSel).filter((id) => multiSel[id])
+  askConfirm(`确定删除选中的 ${ids.length} 个对话吗？删除后不可恢复。`, () => {
+    ids.forEach((id) => delConv(id))
+    clearMultiSel()
+    multiMode.value = false
+  })
+}
 
 const activeId = computed(() => chatState.activeId)
 const current = computed(() => currentConversation())
@@ -169,7 +242,8 @@ function switchConv(id) {
   chatState.activeId = id
   saveStore()
   const c = currentConversation()
-  if (c && c.sid && !c.messages.length) {
+  // 有服务端会话时始终同步：补回刷新/切走期间丢失的 AI 回复与行程卡
+  if (c && c.sid) {
     loadServerMessages(c).then(() => { nextTick(scrollToBottom) })
   }
   inputEl.value && inputEl.value.focus()
@@ -180,12 +254,18 @@ async function loadServerMessages(c) {
   try {
     const data = await api.getSession(c.sid)
     if (data.status !== 'ok' || !Array.isArray(data.recent_messages)) return
-    c.messages = data.recent_messages.map((m) => ({
-      uid: genId(),
-      role: m.role === 'user' ? 'user' : 'assistant',
-      text: typeof m.content === 'string' ? m.content : '',
-      time: '',
-    }))
+    // 服务器消息按时间顺序；本地已存在的消息跳过，仅补回本地缺失的服务端 AI 消息。
+    // 典型场景：规划耗时较长时刷新/切走页面，本地只有用户消息，AI 回复需从服务端补回
+    const localKeys = new Set(c.messages.map((m) => m.role + '|' + m.text))
+    data.recent_messages.forEach((m) => {
+      const text = typeof m.content === 'string' ? m.content : ''
+      const role = m.role === 'user' ? 'user' : 'assistant'
+      if (!text || role !== 'assistant') return
+      const key = role + '|' + text
+      if (localKeys.has(key)) return
+      c.messages.push({ uid: genId(), role, text, time: '' })
+      localKeys.add(key)
+    })
     // 服务端返回的完整行程产物挂到最后一条 AI 消息上，恢复历史会话时也能显示行程卡
     if (data.plan) {
       for (let i = c.messages.length - 1; i >= 0; i--) {
@@ -200,8 +280,11 @@ async function loadServerMessages(c) {
   } catch (e) { /* 网络异常忽略 */ }
 }
 
-async function delConv(id) {
-  if (!confirm('删除这个对话？')) return
+function askDeleteConv(id) {
+  askConfirm('确定删除这个对话吗？删除后不可恢复。', () => delConv(id))
+}
+
+function delConv(id) {
   const target = storeDelConv(id)
   if (target && target.sid) {
     api.deleteSession(target.sid).catch(() => {})
@@ -259,9 +342,15 @@ async function send() {
   const c = currentConversation()
   if (!c) return
 
+  // 新请求发出：中止全部在途请求（含当前会话旧请求），保证同一时刻只有最新请求在跑，
+  // 避免"上一个对话还在运行"的并发混乱与后端会话状态冲突
+  abortAllPending()
+
   input.value = ''
   autoResize()
-  sending.value = true
+
+  const ctrl = new AbortController()
+  pendingMap.set(c.id, { ctrl, text })
 
   const t0 = performance.now()
   const userMsg = { uid: genId(), role: 'user', text, time: nowTime() }
@@ -271,10 +360,12 @@ async function send() {
   nextTick(scrollToBottom)
 
   try {
-    const res = await api.chat({ session_id: c.sid, user_id: memoryUserId(), message: text })
+    const res = await api.chat({ session_id: c.sid, user_id: memoryUserId(), message: text }, ctrl.signal)
+    // 请求返回时若已不是最新请求（切换会话 / 已中止 / 已发起新请求），结果作废不落消息
+    if (pendingMap.get(c.id)?.ctrl !== ctrl) return
     if (res.status === 401) {
       setAccount(null)
-      toast('登录已过期，请重新登录')
+      toast('登录已过期，请重新登录', 'error')
       router.push('/login')
       return
     }
@@ -300,14 +391,45 @@ async function send() {
       typeWriterFor(aiMsg, replyText)
     }
   } catch (e) {
+    // 主动中止（点了停止 / 发起新请求 / 离开页面）：静默作废，不追加错误提示
+    if (e.name === 'AbortError' || pendingMap.get(c.id)?.ctrl !== ctrl) return
     const dur = performance.now() - t0
     c.messages.push({ uid: genId(), role: 'assistant', text: '请求失败：' + e.message, mode: 'error', time: nowTime(), duration: dur })
     nextTick(scrollToBottom)
   } finally {
-    sending.value = false
+    // 只有当前请求仍是最新时才清理该会话的跟踪状态，避免误删新请求的记录
+    if (pendingMap.get(c.id)?.ctrl === ctrl) pendingMap.delete(c.id)
     saveStore()
     inputEl.value && inputEl.value.focus()
   }
+}
+
+// 中止所有在途请求（发起新请求 / 离开页面时调用）
+function abortAllPending() {
+  pendingMap.forEach((entry) => {
+    try { entry.ctrl.abort() } catch (e) { /* 已中止 */ }
+  })
+  pendingMap.clear()
+}
+
+// 停止当前会话的生成：中止请求并在会话里留一条"已中止"提示
+function stopPending() {
+  const c = currentConversation()
+  if (!c) return
+  const entry = pendingMap.get(c.id)
+  if (!entry) return
+  try { entry.ctrl.abort() } catch (e) { /* 已中止 */ }
+  pendingMap.delete(c.id)
+  c.messages.push({
+    uid: genId(),
+    role: 'assistant',
+    text: '已中止本次行程生成。需要的话请重新发送，或告诉我具体想调整哪里。',
+    mode: 'stopped',
+    time: nowTime(),
+  })
+  c.updatedAt = Date.now()
+  saveStore()
+  nextTick(scrollToBottom)
 }
 
 // ===================== 账号 / 后台 =====================
@@ -335,7 +457,7 @@ function doLogout() {
 // ===================== 对话历史 / 长期记忆 =====================
 async function showHist() {
   const c = currentConversation()
-  if (!c) { toast('请先选择或新建对话'); return }
+  if (!c) { toast('请先选择或新建对话', 'error'); return }
   histVisible.value = true
   histHtml.value = '<div style="color:var(--muted)">加载中...</div>'
 
@@ -439,7 +561,7 @@ async function showMem() {
 // ===================== 复制对话记录 =====================
 function copyConv() {
   const c = currentConversation()
-  if (!c || !c.messages.length) { toast('当前对话暂无消息'); return }
+  if (!c || !c.messages.length) { toast('当前对话暂无消息', 'error'); return }
   const lines = c.messages.map((m) => {
     const who = m.role === 'user' ? '我' : 'AI'
     const meta = [m.time, m.role !== 'user' && m.duration ? fmtDuration(m.duration) : '', m.mode !== 'qa' && m.mode ? m.mode : '']
@@ -518,10 +640,18 @@ function restoreSessions() {
 onMounted(() => {
   if (chatState.conversations.length) {
     chatState.activeId = chatState.conversations[0].id
+    // 返回/刷新后同步当前会话：补回后台规划期间已完成的 AI 回复与行程卡
+    const c = currentConversation()
+    if (c && c.sid) loadServerMessages(c).then(() => nextTick(scrollToBottom))
     nextTick(scrollToBottom)
   } else {
     syncServerConversations().then(restoreSessions)
   }
+})
+
+// 离开聊天页（如进入后台管理）时中止全部在途请求，避免返回后"上一个对话还在运行"
+onUnmounted(() => {
+  abortAllPending()
 })
 </script>
 
@@ -534,12 +664,18 @@ onMounted(() => {
 }
 #sidebar .brand { display: flex; align-items: center; gap: 10px; padding: 18px 16px; color: #fff; font-size: 15px; font-weight: 700; letter-spacing: .3px; }
 #sidebar .brand .logo { width: 34px; height: 34px; border-radius: 9px; display: flex; align-items: center; justify-content: center; background: linear-gradient(135deg,#4f6ef7,#7c5cf0); font-size: 18px; flex-shrink: 0; }
-#newConv { margin: 4px 12px 12px; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 10px; border: 1px solid rgba(255,255,255,.14); border-radius: 9px; cursor: pointer; background: rgba(255,255,255,.06); color: #fff; font-size: 13px; font-weight: 600; transition: background .2s; }
+#newConv { flex: 1; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 10px; border: 1px solid rgba(255,255,255,.14); border-radius: 9px; cursor: pointer; background: rgba(255,255,255,.06); color: #fff; font-size: 13px; font-weight: 600; transition: background .2s; }
 #newConv:hover { background: rgba(255,255,255,.14); }
+.side-actions { display: flex; align-items: center; gap: 8px; padding: 4px 12px 12px; }
+.multi-toggle { padding: 10px 12px; border: 1px solid rgba(255,255,255,.14); border-radius: 9px; cursor: pointer; background: rgba(255,255,255,.06); color: #c7cbd6; font-size: 12px; font-weight: 600; white-space: nowrap; transition: background .2s, color .2s; }
+.multi-toggle:hover { background: rgba(255,255,255,.14); color: #fff; }
+.multi-toggle.on { background: rgba(255,80,80,.35); border-color: rgba(255,120,120,.4); color: #fff; }
 #convList { flex: 1; overflow-y: auto; padding: 0 8px 10px; }
 .conv { display: flex; align-items: center; gap: 8px; padding: 10px; border-radius: 9px; cursor: pointer; transition: background .15s; position: relative; margin-bottom: 4px; }
 .conv:hover { background: rgba(255,255,255,.08); }
 .conv.active { background: rgba(255,255,255,.22); }
+.conv.sel { background: rgba(255,255,255,.16); outline: 1px solid rgba(255,255,255,.35); }
+.conv .ck { width: 15px; height: 15px; accent-color: #ff6b70; flex-shrink: 0; cursor: pointer; }
 .conv .meta { flex: 1; min-width: 0; }
 .conv .title { font-size: 13px; color: #eef0f6; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .conv .stamp { font-size: 11px; color: var(--sidebar-text); opacity: .7; margin-top: 2px; }
@@ -547,6 +683,12 @@ onMounted(() => {
 .conv:hover .del { opacity: 1; }
 .conv .del:hover { background: rgba(255,80,80,.35); color: #fff; }
 #convEmpty { padding: 20px; text-align: center; font-size: 12px; color: var(--sidebar-text); opacity: .6; }
+.multi-bar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-top: 1px solid rgba(255,255,255,.12); }
+.multi-bar .spacer { flex: 1; }
+.multi-count { font-size: 12px; color: #fff; }
+.multi-del { padding: 7px 14px; border: 1px solid rgba(255,120,120,.5); border-radius: 8px; cursor: pointer; background: rgba(255,80,80,.35); color: #fff; font-size: 12px; font-weight: 600; transition: background .2s; }
+.multi-del:hover { background: rgba(255,80,80,.55); }
+.multi-del:disabled { opacity: .45; cursor: not-allowed; }
 
 #resizer { width: 6px; cursor: col-resize; background: transparent; flex-shrink: 0; transition: background .15s; }
 #resizer:hover, :global(body.resizing) #resizer { background: var(--primary-light); border-right: 1px solid var(--primary); }
@@ -596,6 +738,8 @@ onMounted(() => {
 @keyframes blink { 50% { opacity: 0; } }
 
 .loading { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; }
+.stop-btn { margin-left: 6px; padding: 4px 12px; border: 1px solid var(--border); border-radius: 8px; background: #fff; color: var(--danger); font-size: 12px; font-weight: 600; cursor: pointer; transition: background .2s; }
+.stop-btn:hover { background: #fdecec; }
 .dot { width: 7px; height: 7px; background: var(--primary); border-radius: 50%; animation: bounce 1.4s infinite; }
 .dot:nth-child(2) { animation-delay: .2s; } .dot:nth-child(3) { animation-delay: .4s; }
 @keyframes bounce { 0%,60%,100% { transform: translateY(0); } 30% { transform: translateY(-6px); } }

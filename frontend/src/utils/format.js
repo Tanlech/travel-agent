@@ -46,10 +46,11 @@ export function renderMarkdown(src) {
   }
 }
 
-export function toast(msg) {
+export function toast(msg, type = 'success') {
   const t = document.createElement('div')
-  t.className = 'toast'
+  t.className = 'toast' + (type === 'error' ? ' error' : '')
   t.textContent = msg
-  document.body.appendChild(t)
+  const host = document.getElementById('app-toast-host')
+  ;(host || document.body).appendChild(t)
   setTimeout(() => t.remove(), 1900)
 }

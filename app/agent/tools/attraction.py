@@ -231,7 +231,7 @@ class AttractionTool:
         if not entry["is_major"]:
             return
         try:
-            from app.agent.knowledge.ingest.attraction import add_spot
+            from app.agent.knowledge.attraction_kb import add_spot
 
             add_spot(
                 city,

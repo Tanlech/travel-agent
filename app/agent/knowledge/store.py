@@ -179,6 +179,20 @@ class QdrantStore:
         else:
             self._retry(self._client.delete_collection, name)
 
+    def delete_by_ids(self, collection: str, ids: list[str]) -> None:
+        """按点 id 精确删除知识块（单个景点删除用）；不存在的 id 自动忽略"""
+        if not ids:
+            return
+        name = self._collection_name(collection)
+        if not self._retry(self._client.collection_exists, name):
+            return
+        real_ids = [self._point_id(pid) for pid in ids]
+        for i in range(0, len(real_ids), _UPSERT_BATCH_SIZE):
+            batch = real_ids[i : i + _UPSERT_BATCH_SIZE]
+            self._retry(self._client.delete,
+                collection_name=name, points_selector=models.PointIdsList(points=batch)
+            )
+
     @staticmethod
     def _build_filter(where: dict | None) -> models.Filter | None:
         if not where:

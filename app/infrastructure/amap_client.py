@@ -132,6 +132,7 @@ class AmapClient:
             "price": safe_float(best.get("cost")),
             "walking_distance": safe_float(best.get("walking_distance")),
             "transits": transits,
+            "polyline_points": self._transit_polyline(best),
         }
 
     def plan_driving(self, *, origin: tuple[float, float], destination: tuple[float, float]) -> dict[str, Any] | None:
@@ -156,6 +157,7 @@ class AmapClient:
             "traffic_lights": safe_int(best.get("traffic_lights")),
             # taxi_cost 位于 route 级，取整条路线的预估出租车费
             "cost": safe_float(route.get("taxi_cost")),
+            "polyline_points": self._steps_polyline(best.get("steps")),
         }
 
     def plan_walking(self, *, origin: tuple[float, float], destination: tuple[float, float]) -> dict[str, Any] | None:
@@ -164,6 +166,7 @@ class AmapClient:
             {
                 "origin": f"{origin[0]},{origin[1]}",
                 "destination": f"{destination[0]},{destination[1]}",
+                "extensions": "all",
             },
         )
         route = data.get("route") or {}
@@ -175,7 +178,55 @@ class AmapClient:
             "mode": "walking",
             "distance_meters": safe_float(best.get("distance")),
             "duration_seconds": safe_float(best.get("duration")),
+            "polyline_points": self._steps_polyline(best.get("steps")),
         }
+
+    def _steps_polyline(self, steps: Any) -> list[list[float]] | None:
+        """把驾车/步行 path.steps 的 polyline（"lng,lat;lng,lat;…"）串联成 [[lat, lng], …]。"""
+        points: list[list[float]] = []
+        for step in steps or []:
+            if not isinstance(step, dict):
+                continue
+            chunk = self._data_coords(step.get("polyline"))
+            if chunk:
+                points.extend(chunk)
+        return points or None
+
+    def _transit_polyline(self, transit: Any) -> list[list[float]] | None:
+        """把公交方案各 segment 的步行/乘坐 polyline 串联成实际走向，用于地图绘制真实公交换乘轨迹。"""
+        if not isinstance(transit, dict):
+            return None
+        points: list[list[float]] = []
+        for segment in transit.get("segments") or []:
+            if not isinstance(segment, dict):
+                continue
+            walking = segment.get("walking")
+            if isinstance(walking, dict):
+                chunk = self._data_coords(walking.get("polyline"))
+                if chunk:
+                    points.extend(chunk)
+            bus = segment.get("bus")
+            if isinstance(bus, dict):
+                buslines = bus.get("buslines") or []
+                if buslines and isinstance(buslines[0], dict):
+                    chunk = self._data_coords(buslines[0].get("polyline"))
+                    if chunk:
+                        points.extend(chunk)
+        return points or None
+
+    def _data_coords(self, polyline: str | None) -> list[list[float]] | None:
+        """'lng,lat;lng,lat;…' → [[lat, lng], …]，用于 Leaflet 绘制。"""
+        if not polyline:
+            return None
+        points: list[list[float]] = []
+        for part in str(polyline).split(";"):
+            if not part or "," not in part:
+                continue
+            lng_text, lat_text = part.split(",", 1)
+            lng, lat = safe_float(lng_text), safe_float(lat_text)
+            if lng is not None and lat is not None:
+                points.append([lat, lng])
+        return points or None
 
     def get_weather_forecast(self, *, city: str) -> dict[str, Any] | None:
         data = self.get_json(

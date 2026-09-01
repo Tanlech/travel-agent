@@ -16,6 +16,14 @@ class WeatherTool:
 
     name = "weather_tool"
 
+    def __init__(self, client=None) -> None:
+        # 可注入的天气后端（测试可替换为 fake）；默认走真实 qweather_client
+        self._backend = client
+
+    @property
+    def client(self):
+        return self._backend if self._backend is not None else qweather_client
+
     def run(self, input_data: WeatherInput) -> WeatherResult:
         city = input_data.city
         start_time = input_data.start_time
@@ -25,7 +33,7 @@ class WeatherTool:
         if start_date is None or end_date is None or start_date > end_date:
             return WeatherResult(city=city, start_date=start_time, end_date=end_time, daily=[], error="日期范围无效")
 
-        if not qweather_client.is_enabled():
+        if not self.client.is_enabled():
             return WeatherResult(city=city, start_date=start_time, end_date=end_time, daily=[], error="和风天气未配置（QWEATHER_API_KEY / QWEATHER_GEO_API_KEY / QWEATHER_HOST）")
 
         forecast, fetch_error = self._fetch_forecast(city, start_date=start_date, end_date=end_date)
@@ -43,7 +51,7 @@ class WeatherTool:
                 daily=daily,
                 error=(
                     "预报窗口未覆盖行程日期"
-                    f"（和风仅支持未来 {qweather_client.config.forecast_days} 天预报，"
+                    f"（和风仅支持未来 {self.client.config.forecast_days} 天预报，"
                     "超出窗口的行程日无天气数据）"
                 ),
                 missing_dates=missing,
@@ -66,7 +74,7 @@ class WeatherTool:
         """
         geo = None
         try:
-            geo = qweather_client.geo_lookup(city)
+            geo = self.client.geo_lookup(city)
         except Exception:
             geo = None
         if not geo:
@@ -75,7 +83,7 @@ class WeatherTool:
         if not location:
             return [], f"城市位置解析失败（{city}）：未返回有效坐标或 LocationID"
         try:
-            forecast = qweather_client.get_daily_forecast(
+            forecast = self.client.get_daily_forecast(
                 location=location,
                 days=self._forecast_days_needed(start_date, end_date),
             )

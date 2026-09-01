@@ -52,6 +52,16 @@ class Settings(BaseSettings):
     qdrant_collection_prefix: str = "kb_"  # Qdrant 集合名前缀，避免与其他应用冲突
     retrieval_prefetch_multiplier: int = 2  # 混合检索 RRF 融合前各路的召回放大系数（越大召回越全，开销越高）
     retrieval_max_top_k: int = 20  # 检索 top_k 上限保护，防止外部传超大值放大召回开销
+    retrieval_candidate_k: int = 30  # 重排前从向量库召回的候选数（仅 rerank 启用时生效，需 >= top_k）
+    # 候选池独立上限：可高于 top_k 上限（max_top_k），为 cross-encoder 重排留出更大召回空间。
+    # 防止人为/默认 candidate_k 被顶级上限 20 静默截断而失去提升意义。
+    retrieval_candidate_max_k: int = 60
+    # 问答知识参考的相关度门槛：distance（混合路为 RRF 融合分，越大越相关）低于该值视为弱相关，
+    # 不注入给模型，避免无关片段干扰与"当面解析参考"等问题。0 表示关闭过滤。
+    ref_min_score: float = 0.3
+    # 重排模型默认置空（不默认启用）：启用需先确保模型可下载/已缓存，否则首调会联网下载并可能卡顿。
+    # 显式在 .env 配 RERANK_MODEL=BAAI/bge-reranker-base 即开启。
+    rerank_model: str | None = None
 
     llm_provider: str = "mock"
     openai_api_key: str | None = None

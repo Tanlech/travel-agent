@@ -409,9 +409,11 @@ class PlanningRepair:
         for day_idx, day in enumerate(draft.day_plans):
             if day_idx < len(weather_days):
                 weather_day = weather_days[day_idx]
-                weather_note = f"天气：{weather_day.weather_day} {weather_day.temperature_range or ''}".strip()
                 day.notes = [note for note in day.notes if not note.startswith("天气：")]
-                day.notes.insert(0, weather_note)
+                # 仅在有真实天气内容时才注入"天气：…"备注，避免出现空的"天气："占位
+                if weather_day.weather_day:
+                    weather_note = f"天气：{weather_day.weather_day} {weather_day.temperature_range or ''}".strip()
+                    day.notes.insert(0, weather_note)
                 if any(keyword in (weather_day.weather_day or "") for keyword in ["雷阵雨", "暴雨", "阵雨"]):
                     extra_note = "当日存在降雨风险，优先选择室内或半室内项目，并预留机动调整时间。"
                     if extra_note not in day.notes:

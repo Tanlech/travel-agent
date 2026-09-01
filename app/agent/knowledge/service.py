@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import threading
+from collections import OrderedDict
 
+from app.infrastructure.settings import settings
 from app.infrastructure.llm_client import get_llm_client
 from app.agent.knowledge.embedder import (
     SparseTextEmbedder,
@@ -11,11 +14,43 @@ from app.agent.knowledge.embedder import (
     text_embedder,
 )
 from app.agent.knowledge.ingest.qa import load_qa_documents
+from app.agent.knowledge.reranker import reranker as _reranker
 from app.agent.knowledge.retriever import embed_cached, retrieve
 from app.agent.knowledge.schemas import RetrievalItem, RetrievalResult, TextChunk
 from app.agent.knowledge.store import QdrantStore, qdrant_store
 
 logger = logging.getLogger(__name__)
+
+# 检索结果级 LRU 缓存：(collection, 归一化 query, top_k, 序列化 where) → RetrievalResult
+# 与 retriever.embed_cached（缓存的向量）互补：向量缓存省"编码"，此处缓存省"向量库搜索"，
+# 命中时整次检索（embed + store.query）都被跳过。进程内实现，无外部依赖、永不阻塞；
+# 需要跨请求/多 worker 共享时，可把 get/set 换成 Redis（同一接口，直接替换即可）。
+_RESULT_CACHE: "OrderedDict[tuple, RetrievalResult]" = OrderedDict()
+_MAX_RESULT_CACHE = 256
+_RESULT_CACHE_LOCK = threading.Lock()
+
+
+def _retrieve_cache_key(collection: str, query: str, top_k: int, where: dict | None, rerank: bool, candidate_k: int) -> tuple:
+    """构造结果缓存键：归一化 query 提升命中率，where 排序序列化保证稳定；
+    rerank 与 candidate_k 参与键，避免"开启/关闭重排"或候选数变化时误命中错版本结果
+    """
+    return (
+        collection,
+        " ".join(query.strip().lower().split()),
+        max(1, int(top_k)),
+        tuple(sorted((str(k), str(v)) for k, v in (where or {}).items())),
+        rerank,
+        max(1, int(candidate_k)),
+    )
+
+
+def _cache_put(cache_key: tuple, result: RetrievalResult) -> None:
+    """加锁写入结果缓存：缓存满时挤出最旧，避免无界增长"""
+    with _RESULT_CACHE_LOCK:
+        if len(_RESULT_CACHE) >= _MAX_RESULT_CACHE:
+            _RESULT_CACHE.popitem(last=False)
+        _RESULT_CACHE[cache_key] = result
+
 
 _ASK_SYSTEM_PROMPT = (
     "你是旅行规划助手。请基于提供的参考资料回答用户问题，"
@@ -141,8 +176,39 @@ class KnowledgeService:
     def retrieve(self, collection: str, query: str, top_k: int = 5, where: dict | None = None) -> RetrievalResult:
         if not query or not query.strip():
             return RetrievalResult(collection=collection, query=query, items=[])
+
+        rerank = _reranker.is_enabled()
+        candidate_k = settings.retrieval_candidate_k if rerank else top_k
+        cache_key = _retrieve_cache_key(collection, query, top_k, where, rerank, candidate_k)
+        cached = _RESULT_CACHE.get(cache_key)
+        if cached is not None:
+            # 加锁保护 move_to_end：避免缓存满时其它线程刚 popitem 挤出该键导致 KeyError
+            with _RESULT_CACHE_LOCK:
+                if _RESULT_CACHE.get(cache_key) is not None:
+                    _RESULT_CACHE.move_to_end(cache_key)
+                else:
+                    cached = None
+            if cached is None:
+                # 命中后又被并发挤出的极窄窗口：直接走重新检索路径
+                query_sparse = embed_cached(self.sparse_embedder, query, "sparse") if self._hybrid_enabled else None
+                result = retrieve(self.store, self.embedder, collection, query, top_k=top_k, where=where, query_sparse=query_sparse, reranker=_reranker if rerank else None, candidate_k=candidate_k)
+                _cache_put(cache_key, result)
+                return result.model_copy(deep=True)
+            logger.info(
+                "kb retrieve cache hit: collection=%s query=%r top_k=%s rerank=%s",
+                collection,
+                query,
+                top_k,
+                rerank,
+            )
+            # 返回深拷贝，避免调用方修改返回值污染共享缓存
+            return cached.model_copy(deep=True)
+
         query_sparse = embed_cached(self.sparse_embedder, query, "sparse") if self._hybrid_enabled else None
-        return retrieve(self.store, self.embedder, collection, query, top_k=top_k, where=where, query_sparse=query_sparse)
+        result = retrieve(self.store, self.embedder, collection, query, top_k=top_k, where=where, query_sparse=query_sparse, reranker=_reranker if rerank else None, candidate_k=candidate_k)
+
+        _cache_put(cache_key, result)
+        return result.model_copy(deep=True)
 
     def get_all(self, collection: str, where: dict | None = None) -> list[RetrievalItem]:
         return self.store.get_all(collection, where=where)

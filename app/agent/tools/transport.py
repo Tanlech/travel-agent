@@ -11,6 +11,15 @@ class TransportTool:
     """根据 Agent 提供的条件查询同城单段或多段交通路线（步行/打车/公交）"""
 
     name = "transport_tool"
+
+    def __init__(self, amap=None) -> None:
+        # 可注入的后端（测试可替换为 fake）；默认走真实 amap_client
+        self._amap = amap
+
+    @property
+    def amap(self):
+        return self._amap if self._amap is not None else amap_client
+
     _DEFAULT_DISTANCE = 999999
     _DEFAULT_TRANSFER = 999
     _DEFAULT_DURATION = 999999
@@ -23,7 +32,7 @@ class TransportTool:
         多地点时按顺序连接：from_name → waypoint[0] → ... → waypoint[n-1] → to_name
         """
         city = input_data.city
-        if not amap_client.is_enabled():
+        if not self.amap.is_enabled():
             return [
                 TransportResult(
                     city=city,
@@ -105,9 +114,9 @@ class TransportTool:
         if origin_coords is None or destination_coords is None:
             return {"walk": None, "taxi": None, "transit": None}
         return {
-            "walk": self._safe_fetch(lambda: amap_client.plan_walking(origin=origin_coords, destination=destination_coords)),
-            "taxi": self._safe_fetch(lambda: amap_client.plan_driving(origin=origin_coords, destination=destination_coords)),
-            "transit": self._safe_fetch(lambda: amap_client.plan_transit(origin=origin_coords, destination=destination_coords, city=city)),
+            "walk": self._safe_fetch(lambda: self.amap.plan_walking(origin=origin_coords, destination=destination_coords)),
+            "taxi": self._safe_fetch(lambda: self.amap.plan_driving(origin=origin_coords, destination=destination_coords)),
+            "transit": self._safe_fetch(lambda: self.amap.plan_transit(origin=origin_coords, destination=destination_coords, city=city)),
         }
 
     def _safe_fetch(self, callable) -> dict | None:
@@ -241,13 +250,13 @@ class TransportTool:
         if not name:
             return None
         try:
-            pois = amap_client.search_pois(keywords=name, city=city, city_limit=True)
+            pois = self.amap.search_pois(keywords=name, city=city, city_limit=True)
         except Exception:
             return None
         if pois:
             return pois[0]
         try:
-            geocoded = amap_client.geocode(address=name, city=city)
+            geocoded = self.amap.geocode(address=name, city=city)
         except Exception:
             return None
         if geocoded:

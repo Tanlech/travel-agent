@@ -75,12 +75,18 @@
                 <div v-else class="md" v-html="msgMarkdown(m)"></div>
               </div>
               <PlanCard v-if="m.plan" :plan="m.plan" @show-map="planForMap = $event" />
+              <button
+                v-if="m.plan"
+                class="undo-btn"
+                title="撤销最近一次行程调整，恢复上一版方案"
+                :disabled="currentSending"
+                @click="undoPlan"
+              >↺ 撤销</button>
             </div>
             <div v-if="currentSending" class="msg ai">
               <div class="loading show">
                 <span class="dot"></span><span class="dot"></span><span class="dot"></span>
-                <span>正在思考...</span>
-                <button class="stop-btn" @click="stopPending">⏹ 停止</button>
+                <span>{{ stagePending || '正在思考...' }}<template v-if="waitSec"> · 已等待 {{ waitSec }} 秒</template></span>
               </div>
             </div>
           </template>
@@ -103,7 +109,7 @@
               @keydown="onKeydown"
               @input="autoResize"
             ></textarea>
-            <button id="send" :disabled="currentSending" @click="send">发送</button>
+            <button id="send" :class="{ stopping: currentSending }" @click="currentSending ? stopPending() : send()">{{ currentSending ? '⏹ 停止' : '发送' }}</button>
           </div>
         </div>
         <div class="hint">提示：规划可能需要 1-2 分钟（调用高德地图 + 大模型）。多轮对话会自动累计出行需求，每条回复会显示耗时。</div>
@@ -156,11 +162,13 @@ import PlanMapModal from '@/components/PlanMapModal.vue'
 const router = useRouter()
 
 const input = ref('')
-const typing = ref(null) // { id, text }
 const sidebarWidth = ref(272)
 const acctOpen = ref(false)
 const inputEl = ref(null)
 const messagesEl = ref(null)
+// SSE 流式进度：阶段标签 + 已等待秒数（由 /chat/stream 的 stage/ping 事件驱动）
+const stagePending = ref('')
+const waitSec = ref(0)
 
 // 在途请求跟踪：conv.id -> { ctrl: AbortController, text }。
 // 请求级中止 + 按会话隔离，解决"无法中断上一个对话 / 再次发送时上一个还在运行"
@@ -232,6 +240,10 @@ const acctName = computed(() => {
 
 // ===================== 会话管理 =====================
 function newConv() {
+  input.value = ''
+  autoResize()
+  stagePending.value = ''
+  waitSec.value = 0
   const c = storeNewConv()
   chatState.activeId = c.id
   inputEl.value && inputEl.value.focus()
@@ -241,6 +253,11 @@ function newConv() {
 function switchConv(id) {
   chatState.activeId = id
   saveStore()
+  // 输入框为跨会话共享，切换时清空，避免把上一会话遗留的草稿带进来
+  input.value = ''
+  autoResize()
+  stagePending.value = ''
+  waitSec.value = 0
   const c = currentConversation()
   // 有服务端会话时始终同步：补回刷新/切走期间丢失的 AI 回复与行程卡
   if (c && c.sid) {
@@ -299,22 +316,7 @@ function msgMeta(m) {
   return time + dur
 }
 function msgMarkdown(m) {
-  const text = typing.value && typing.value.id === m.uid ? typing.value.text : m.text
-  return renderMarkdown(text) + (typing.value && typing.value.id === m.uid ? '<span class="caret"></span>' : '')
-}
-function typeWriterFor(msg, fullText, onDone) {
-  typing.value = { id: msg.uid, text: '' }
-  let i = 0
-  const timer = setInterval(() => {
-    i += 2
-    typing.value = { id: msg.uid, text: fullText.slice(0, Math.min(i, fullText.length)) }
-    scrollToBottom()
-    if (i >= fullText.length) {
-      clearInterval(timer)
-      typing.value = null
-      if (onDone) onDone()
-    }
-  }, 16)
+  return renderMarkdown(m.text)
 }
 
 function scrollToBottom() {
@@ -324,7 +326,7 @@ function scrollToBottom() {
 }
 
 watch(() => chatState.conversations.map((c) => c.messages.length).join(','), () => {
-  if (!typing.value) scrollToBottom()
+  scrollToBottom()
 })
 
 // ===================== 发送 =====================
@@ -359,42 +361,70 @@ async function send() {
   if (c.title === '新对话') c.title = text.slice(0, 18)
   nextTick(scrollToBottom)
 
+  // 流式占位：先落一条"正在生成"的 assistant 消息，token 到达后原地追加文本，
+  // 替换旧的"整段返回 + 假打字机"体验；真实内容在 token 事件到达时逐步可见
+  const aiMsg = { uid: genId(), role: 'assistant', text: '', mode: '', time: nowTime(), streaming: true, plan: null }
+  c.messages.push(aiMsg)
+  stagePending.value = '正在理解你的需求…'
+  waitSec.value = 0
+
+  // 定稿流式占位消息（仅执行一次：onDone 与 resolve 后置双保险，由 streaming 标志去重）
+  const finishStream = (o) => {
+    if (!aiMsg.streaming || !o) return
+    aiMsg.streaming = false
+    stagePending.value = ''
+    waitSec.value = 0
+    aiMsg.text = o.summary || o.follow_up_question || '(无回复)'
+    aiMsg.mode = o.mode || ''
+    aiMsg.duration = performance.now() - t0
+    aiMsg.plan = o.plan || null
+    if (o.session_id) c.sid = o.session_id
+    c.updatedAt = Date.now()
+    saveStore()
+    nextTick(scrollToBottom)
+  }
+
   try {
-    const res = await api.chat({ session_id: c.sid, user_id: memoryUserId(), message: text }, ctrl.signal)
-    // 请求返回时若已不是最新请求（切换会话 / 已中止 / 已发起新请求），结果作废不落消息
+    const done = await api.chatStream(
+      { session_id: c.sid, user_id: memoryUserId(), message: text },
+      ctrl.signal,
+      {
+        onPing: (o) => { waitSec.value = o.elapsed || 0 },
+        onStage: (o) => { if (o && o.label) stagePending.value = o.label },
+        onToken: (o) => {
+          if (o && o.text) {
+            aiMsg.text += o.text
+            scrollToBottom()
+          }
+        },
+        onDone: (o) => finishStream(o),
+      }
+    )
+    // 请求返回时若已不是最新请求（切换会话 / 中止 / 发起新请求），结果作废不落消息
     if (pendingMap.get(c.id)?.ctrl !== ctrl) return
-    if (res.status === 401) {
+    finishStream(done)
+  } catch (e) {
+    if (e.status === 401) {
+      // 登录失效：移除占位并回登录
+      c.messages = c.messages.filter((m) => m.uid !== aiMsg.uid)
+      stagePending.value = ''
+      if (pendingMap.get(c.id)?.ctrl === ctrl) pendingMap.delete(c.id)
       setAccount(null)
       toast('登录已过期，请重新登录', 'error')
       router.push('/login')
       return
     }
-    if (res.session_id) c.sid = res.session_id
-    const duration = performance.now() - t0
-    // 必须优先用后端真实回复，不能用用户输入文本当回复
-    const replyText = res.summary || res.follow_up_question || '(无回复)'
-    const aiMsg = {
-      uid: genId(),
-      role: 'assistant',
-      text: replyText,
-      mode: res.mode,
-      time: nowTime(),
-      duration,
-      plan: res.plan || null,
+    // 主动中止（点了停止 / 发起新请求 / 离开页面）：静默移除占位（"已中止"提示由 stopPending 负责）
+    if (e.name === 'AbortError' || pendingMap.get(c.id)?.ctrl !== ctrl) {
+      c.messages = c.messages.filter((m) => m.uid !== aiMsg.uid)
+      stagePending.value = ''
+      return
     }
-    c.messages.push(aiMsg)
-    c.updatedAt = Date.now()
-    saveStore()
-    if (aiMsg.mode === 'error') {
-      nextTick(scrollToBottom)
-    } else {
-      typeWriterFor(aiMsg, replyText)
-    }
-  } catch (e) {
-    // 主动中止（点了停止 / 发起新请求 / 离开页面）：静默作废，不追加错误提示
-    if (e.name === 'AbortError' || pendingMap.get(c.id)?.ctrl !== ctrl) return
-    const dur = performance.now() - t0
-    c.messages.push({ uid: genId(), role: 'assistant', text: '请求失败：' + e.message, mode: 'error', time: nowTime(), duration: dur })
+    aiMsg.streaming = false
+    aiMsg.mode = 'error'
+    aiMsg.text = '请求失败：' + e.message
+    aiMsg.duration = performance.now() - t0
+    stagePending.value = ''
     nextTick(scrollToBottom)
   } finally {
     // 只有当前请求仍是最新时才清理该会话的跟踪状态，避免误删新请求的记录
@@ -430,6 +460,30 @@ function stopPending() {
   c.updatedAt = Date.now()
   saveStore()
   nextTick(scrollToBottom)
+}
+
+// 撤销最近一次行程调整：调用后端恢复上一版 plan/draft，并刷新会话内最后一张行程卡
+async function undoPlan() {
+  const c = currentConversation()
+  if (!c || !c.sid) return
+  try {
+    const res = await api.undoSession(c.sid)
+    if (!res || res.status !== 'ok') { toast('撤销失败，请稍后重试', 'error'); return }
+    if (!res.undone) { toast('没有可撤销的行程调整', 'warn'); return }
+    for (let i = c.messages.length - 1; i >= 0; i--) {
+      const m = c.messages[i]
+      if (m.role === 'assistant' && m.plan) {
+        m.plan = res.plan || null
+        if (res.plan && res.plan.summary) m.text = res.plan.summary
+        break
+      }
+    }
+    c.updatedAt = Date.now()
+    saveStore()
+    toast('已撤销，回到上一版行程')
+  } catch (e) {
+    toast('撤销失败：' + e.message, 'error')
+  }
 }
 
 // ===================== 账号 / 后台 =====================
@@ -709,7 +763,7 @@ onUnmounted(() => {
 
 #messages { flex: 1; overflow-y: auto; padding: 24px; scroll-behavior: smooth; }
 #messages .inner { max-width: 880px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
-.msg { display: flex; flex-direction: column; max-width: 86%; animation: fadeIn .25s ease; }
+.msg { display: flex; flex-direction: column; max-width: 86%; min-width: 0; animation: fadeIn .25s ease; }
 .msg.user { align-self: flex-end; align-items: flex-end; }
 .msg.ai { align-self: flex-start; align-items: flex-start; }
 .msg .head { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; font-size: 11px; color: var(--muted); }
@@ -717,7 +771,7 @@ onUnmounted(() => {
 .avatar { width: 26px; height: 26px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; color: #fff; flex-shrink: 0; }
 .avatar.ai { background: linear-gradient(135deg,#4f6ef7,#7c5cf0); }
 .avatar.user { background: #99a2ad; }
-.bubble { padding: 10px 14px; border-radius: 14px; line-height: 1.7; font-size: 14px; word-break: break-word; }
+.bubble { padding: 10px 14px; border-radius: 14px; line-height: 1.7; font-size: 14px; min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
 .msg.ai .bubble { background: var(--bubble-ai); border: 1px solid var(--border); color: #2a2d37; border-bottom-left-radius: 4px; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
 .msg.user .bubble { background: var(--bubble-user); color: #fff; border-bottom-right-radius: 4px; box-shadow: 0 2px 8px rgba(79,110,247,.25); white-space: pre-wrap; }
 .bubble .plain { white-space: pre-wrap; }
@@ -740,6 +794,9 @@ onUnmounted(() => {
 .loading { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; }
 .stop-btn { margin-left: 6px; padding: 4px 12px; border: 1px solid var(--border); border-radius: 8px; background: #fff; color: var(--danger); font-size: 12px; font-weight: 600; cursor: pointer; transition: background .2s; }
 .stop-btn:hover { background: #fdecec; }
+.undo-btn { margin-top: 6px; align-self: flex-start; padding: 5px 14px; border: 1px solid var(--border); border-radius: 8px; background: #fff; color: var(--primary); font-size: 12px; font-weight: 600; cursor: pointer; transition: background .2s, border-color .2s; }
+.undo-btn:hover:not(:disabled) { background: var(--primary-light); border-color: var(--primary); }
+.undo-btn:disabled { opacity: .5; cursor: not-allowed; }
 .dot { width: 7px; height: 7px; background: var(--primary); border-radius: 50%; animation: bounce 1.4s infinite; }
 .dot:nth-child(2) { animation-delay: .2s; } .dot:nth-child(3) { animation-delay: .4s; }
 @keyframes bounce { 0%,60%,100% { transform: translateY(0); } 30% { transform: translateY(-6px); } }
@@ -751,6 +808,8 @@ onUnmounted(() => {
 #send { background: var(--primary); color: #fff; border: none; padding: 9px 20px; border-radius: 10px; cursor: pointer; font-size: 14px; font-weight: 600; transition: background .2s; flex-shrink: 0; }
 #send:hover { background: var(--primary-dark); }
 #send:disabled { background: #b9c0d6; cursor: not-allowed; }
+#send.stopping { background: var(--danger); }
+#send.stopping:hover { background: #c0232f; }
 #composer .hint { max-width: 880px; margin: 8px auto 0; font-size: 11px; color: var(--muted); }
 
 @media (max-width: 720px) {

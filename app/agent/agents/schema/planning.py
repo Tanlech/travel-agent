@@ -200,8 +200,11 @@ class FinalItineraryRenderInput(BaseModel):
     attraction_candidates: list[dict] = Field(default_factory=list)
     lodging_candidates: list[dict] = Field(default_factory=list)
     selected_lodging: dict | None = None
+    meal_candidates: list[dict] = Field(default_factory=list)
     planning_anchor: dict | None = None
     transport_evidence: list[dict] = Field(default_factory=list)
+    kb_attraction_details: list[dict] = Field(default_factory=list)
+    city_kb_guide: list[str] = Field(default_factory=list)
 
 
 __all__ = [

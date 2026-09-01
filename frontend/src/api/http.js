@@ -1,11 +1,17 @@
 import { accountState } from '@/store/auth'
 
-// 通用请求：自动携带登录令牌；adminToken 非空时优先使用（后台页单独存令牌）
-export async function request(path, options = {}, adminToken = null) {
-  const headers = Object.assign({ 'Content-Type': 'application/json' }, options.headers || {})
+// 构造通用请求头：自动携带登录令牌；adminToken 非空时优先使用（后台页单独存令牌）
+export function authHeader(adminToken = null) {
+  const headers = { 'Content-Type': 'application/json' }
   const acc = accountState.account
   const tk = adminToken || (acc && acc.token ? acc.token : null)
   if (tk) headers['Authorization'] = 'Bearer ' + tk
+  return headers
+}
+
+// 通用请求：自动携带登录令牌；adminToken 非空时优先使用（后台页单独存令牌）
+export async function request(path, options = {}, adminToken = null) {
+  const headers = Object.assign(authHeader(adminToken), options.headers || {})
   const res = await fetch(path, Object.assign({}, options, { headers }))
   let data = null
   try {

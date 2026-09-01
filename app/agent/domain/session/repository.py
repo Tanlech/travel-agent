@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Any, Protocol
 
 import redis
@@ -25,6 +26,13 @@ class SessionRepository(Protocol):
     def list_summaries(self, user_id: str | None = None) -> list[dict]: ...
     def delete_by_user(self, user_id: str) -> int: ...
     def delete(self, session_id: str) -> None: ...
+    def append_event(self, session_id: str, event_type: str, data: dict | None = None) -> None: ...
+    def list_events(self, session_id: str, limit: int = 200) -> list[dict]: ...
+    def push_undo(self, session_id: str, snapshot: dict | None) -> None: ...
+    def pop_undo(self, session_id: str) -> dict | None: ...
+    def has_undo(self, session_id: str) -> bool: ...
+    def pop_undo_if_any(self, session_id: str) -> tuple[bool, dict | None]: ...
+    def restore_artifacts(self, session_id: str, snapshot: dict | None) -> None: ...
 
 
 def _state_key(session_id: str) -> str:
@@ -41,6 +49,28 @@ def _artifacts_key(session_id: str) -> str:
 
 def _idempotent_key(session_id: str, request_id: str) -> str:
     return f"session:{session_id}:req:{request_id}"
+
+
+def _events_key(session_id: str) -> str:
+    return f"session:{session_id}:events"
+
+
+def _undo_key(session_id: str) -> str:
+    return f"session:{session_id}:undo"
+
+
+# 事件日志与撤销栈条数上限（只追加，取最新窗口）
+_EVENT_LOG_LIMIT = 500
+_UNDO_STACK_LIMIT = 8
+
+# 原子"判断并弹栈"：列表为空返回 false，否则 RPOP 出最近快照
+_POP_UNDO_IF_ANY_LUA = """
+local key = KEYS[1]
+if redis.call('LLEN', key) == 0 then
+    return false
+end
+return redis.call('RPOP', key)
+"""
 
 
 # 请求级幂等缓存 TTL：仅对"短时间内同 request_id 重试"有效，短窗口即够；
@@ -167,6 +197,90 @@ class RedisSessionRepository:
             ex=_IDEMPOTENT_RESPONSE_TTL_SECONDS,
         )
 
+    # ===================== 会话事件日志（只追加，历史重建基础） =====================
+
+    def append_event(self, session_id: str, event_type: str, data: dict | None = None) -> None:
+        """向会话追加一条事件（user_message / assistant_reply / plan_commit ...）。
+        只追加：不修改历史，服务端可据此重建完整上下文。"""
+        if not session_id:
+            return
+        event = {
+            "type": event_type,
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "data": data,
+        }
+        key = _events_key(session_id)
+        self.redis.rpush(key, json.dumps(event, ensure_ascii=False))
+        self.redis.ltrim(key, -_EVENT_LOG_LIMIT, -1)
+        self.redis.expire(key, settings.redis_ttl_seconds)
+
+    def list_events(self, session_id: str, limit: int = 200) -> list[dict]:
+        """按时间顺序返回事件日志（取最近 limit 条）；损坏条目跳过"""
+        if not session_id:
+            return []
+        raw_items = self.redis.lrange(_events_key(session_id), -limit, -1)
+        events: list[dict] = []
+        for raw in raw_items:
+            try:
+                events.append(json.loads(raw))
+            except (ValueError, TypeError):
+                continue
+        return events
+
+    # ===================== 撤销栈（plan/draft 快照，LIFO） =====================
+
+    def push_undo(self, session_id: str, snapshot: dict | None) -> None:
+        """入栈一份要覆盖前的快照 {plan, draft}；超过上限截掉最早的"""
+        if not session_id or snapshot is None:
+            return
+        key = _undo_key(session_id)
+        self.redis.rpush(key, json.dumps(snapshot, ensure_ascii=False))
+        self.redis.ltrim(key, -_UNDO_STACK_LIMIT, -1)
+        self.redis.expire(key, settings.redis_ttl_seconds)
+
+    def pop_undo(self, session_id: str) -> dict | None:
+        """弹出最近的快照用于撤销；无则返回 None"""
+        if not session_id:
+            return None
+        raw = self.redis.rpop(_undo_key(session_id))
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+
+    def has_undo(self, session_id: str) -> bool:
+        if not session_id:
+            return False
+        return bool(self.redis.llen(_undo_key(session_id)))
+
+    def pop_undo_if_any(self, session_id: str) -> tuple[bool, dict | None]:
+        """原子地判断并弹出最近的撤销快照（避免 has_undo 与 rpop 两步间的竞争）：
+        返回 (是否有可撤销, 快照)；无则 (False, None)。"""
+        if not session_id:
+            return False, None
+        raw = self.redis.eval(_POP_UNDO_IF_ANY_LUA, 1, _undo_key(session_id))
+        if not raw:
+            return False, None
+        try:
+            return True, json.loads(raw)
+        except (ValueError, TypeError):
+            return True, None
+
+    def restore_artifacts(self, session_id: str, snapshot: dict | None) -> None:
+        """把快照写回 artifacts（撤销恢复用）；无快照则清空产物"""
+        if not session_id:
+            return
+        if snapshot is None:
+            snapshot = {"plan": None, "draft": None}
+        self.redis.set(
+            _artifacts_key(session_id),
+            json.dumps({"plan": snapshot.get("plan"), "draft": snapshot.get("draft")}, ensure_ascii=False),
+            ex=settings.redis_ttl_seconds,
+        )
+        return
+
     def list_summaries(self, user_id: str | None = None) -> list[dict]:
         """扫描所有会话，返回列表摘要（供前端多会话列表服务端同步 / 后台按用户过滤）。"""
         sessions: list[dict] = []
@@ -240,7 +354,7 @@ class RedisSessionRepository:
         """删除会话的 state / artifacts / 全部 idempotent 缓存。"""
         if not session_id:
             return
-        keys = [_state_key(session_id), _artifacts_key(session_id)]
+        keys = [_state_key(session_id), _artifacts_key(session_id), _events_key(session_id), _undo_key(session_id)]
         # 幂等缓存是 `session:{id}:req:*`，需前缀扫描删除
         try:
             keys.extend(list(self.redis.scan_iter(_idempotent_key(session_id, "*"), count=50)))

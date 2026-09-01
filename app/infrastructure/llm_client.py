@@ -16,6 +16,11 @@ from app.agent.domain.intent.schema import IntentRecognitionOutput
 from app.infrastructure.settings import settings
 
 
+# 规划类结构化生成使用的温度：比通用对话略高，让酒店/景点选择与每日排法在合理范围内有差异，
+# 避免同一行程反复生成“千篇一律”的酒店与景点。
+PLANNING_TEMPERATURE = 0.85
+
+
 class LLMClient:
     def __init__(self) -> None:
         self.provider = settings.llm_provider.lower()
@@ -23,7 +28,7 @@ class LLMClient:
         self.model = settings.openai_model
         self.temperature = settings.llm_temperature
         self.timeout = settings.llm_timeout
-        self.max_retries = 2
+        self.max_retries = 1
         self.client = None
         self._last_debug = threading.local()
         if self.enabled:
@@ -57,6 +62,7 @@ class LLMClient:
             schema=ClusterPlanning,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
+            temperature=PLANNING_TEMPERATURE,
             retry_hints=[
                 "Return JSON only.",
                 "All selected_spots and optional_spots must come from the provided attraction candidates.",
@@ -70,6 +76,7 @@ class LLMClient:
             schema=PlanningSkeleton,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
+            temperature=PLANNING_TEMPERATURE,
             retry_hints=[
                 "Return JSON only.",
                 "Act as a travel planner, not a formatter.",
@@ -82,6 +89,7 @@ class LLMClient:
             schema=LodgingFitnessResult,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
+            temperature=PLANNING_TEMPERATURE,
             retry_hints=[
                 "Return JSON only.",
                 "Assess whether the current lodging anchor fits the skeleton.",
@@ -94,6 +102,7 @@ class LLMClient:
             schema=ItineraryDraftSchema,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
+            temperature=PLANNING_TEMPERATURE,
             retry_hints=[
                 "Return JSON only.",
                 "Do not wrap the JSON in markdown fences.",
@@ -208,6 +217,55 @@ class LLMClient:
         self.last_debug_info = {"status": "success"}
         return content.strip()
 
+    # 流式自由文本对话：与 generate_chat_reply 同口径，但 stream=True 逐 token 调用 emit 推送
+    # LLM 不可用/报错/空回复时返回 None（由调用方降级）；emit 内部异常不中断累加
+    def generate_chat_reply_stream(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        history: list[dict] | None = None,
+        emit: Any = None,
+    ) -> str | None:
+        if not self._ensure_enabled():
+            return None
+        try:
+            messages: list[dict] = [{"role": "system", "content": system_prompt}]
+            if history:
+                messages.extend(history)
+            messages.append({"role": "user", "content": user_prompt})
+            stream = self.client.chat.completions.create(
+                model=self.model,
+                temperature=self.temperature,
+                messages=messages,
+                stream=True,
+            )
+            parts: list[str] = []
+            for chunk in stream:
+                if not getattr(chunk, "choices", None):
+                    continue
+                delta = chunk.choices[0].delta
+                piece = getattr(delta, "content", None) or ""
+                if piece:
+                    parts.append(piece)
+                    if emit:
+                        try:
+                            emit(piece)
+                        except Exception:  # noqa: BLE001
+                            pass
+        except Exception as exc:
+            self.last_debug_info = {
+                "status": "api_error",
+                "reason": f"{type(exc).__name__}: {exc}",
+            }
+            return None
+        content = "".join(parts).strip()
+        if not content:
+            self.last_debug_info = {"status": "empty_response"}
+            return None
+        self.last_debug_info = {"status": "success"}
+        return content
+
     # OpenAI function calling：LLM 自主决定调用哪些工具、传什么参数
     # 多轮循环：LLM 返回 tool_calls → 逐条执行（dispatch_tool_call）→ 结果回填 → 继续对话
     # 直到 LLM 不再请求工具（返回最终内容）或达到 max_rounds 上限
@@ -307,6 +365,7 @@ class LLMClient:
         system_prompt: str,
         user_prompt: str,
         retry_hints: list[str],
+        temperature: float | None = None,
     ) -> Any | None:
         if not self._ensure_enabled():
             return None
@@ -333,7 +392,7 @@ class LLMClient:
             try:
                 response = self.client.chat.completions.create(
                     model=self.model,
-                    temperature=self.temperature,
+                    temperature=temperature if temperature is not None else self.temperature,
                     response_format={"type": "json_object"},
                     messages=messages,
                 )

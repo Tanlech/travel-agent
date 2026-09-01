@@ -45,6 +45,11 @@ class PlanningReflection:
             ReflectionCheck("transport_reasonableness", "daily_plan", self._check_transport_reasonableness),
         ]
 
+    def rule_review(self, state: PlanningContext, scopes: set[str] | None = None, days: set[int] | None = None) -> ReflectionResult:
+        """纯规则复检（不调 LLM）：收敛期间用于廉价前置判断与修复后的验证收尾，
+        避免每轮都走整篇 LLM 评审，显著压缩「校验并完善行程」阶段的串行 LLM 调用。"""
+        return self._rule_based_review(state, scopes=scopes, days=days)
+
     def review(self, state: PlanningContext, scopes: set[str] | None = None, days: set[int] | None = None) -> ReflectionResult:
         llm_client = get_llm_client()
         fallback = self._rule_based_review(state, scopes=scopes, days=days)

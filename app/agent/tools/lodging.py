@@ -31,6 +31,15 @@ class LodgingTool:
     _MAX_QUERY_SPOTS = 3  # 生成"XX附近酒店"查询时使用的景点数（与 base/grade/pref 共享 6 条查询额度）
     _MAX_GEOCODE_SPOTS = 4  # 计算距离时 geocode 的景点数（应 >= _MAX_QUERY_SPOTS）
     _MAX_DISTANCE_KM = 40  # 距最近景点超过该距离的候选直接过滤
+
+    def __init__(self, amap=None) -> None:
+        # 可注入的后端（测试可替换为 fake）；默认走真实 amap_client
+        self._amap = amap
+
+    @property
+    def amap(self):
+        return self._amap if self._amap is not None else amap_client
+
     _GRADE_HINTS = ("三星", "四星", "五星", "经济", "连锁", "舒适", "豪华", "高档", "快捷", "商务", "民宿", "旅馆", "青年旅舍", "青旅")
     # 用户档次偏好词 → 高德 keytag 候选（避免"星"子串误匹配所有星级）
     _GRADE_KEYTAG_MAP = {
@@ -119,12 +128,12 @@ class LodgingTool:
         )
 
     def _spot_coords(self, lodging_input: LodgingInput) -> dict[str, tuple[float, float]]:
-        if not amap_client.is_enabled():
+        if not self.amap.is_enabled():
             return {}
         coords: dict[str, tuple[float, float]] = {}
         for spot in lodging_input.spots[: self._MAX_GEOCODE_SPOTS]:
             try:
-                location = amap_client.geocode(address=spot, city=lodging_input.destination)
+                location = self.amap.geocode(address=spot, city=lodging_input.destination)
             except Exception:
                 location = None
             parsed = self._extract_coords(location)
@@ -138,7 +147,7 @@ class LodgingTool:
         queries: list[tuple[str, str, str]],
         spot_coords: dict[str, tuple[float, float]],
     ) -> list[_RankedCandidate]:
-        if not amap_client.is_enabled():
+        if not self.amap.is_enabled():
             return []
         indexed: dict[str, _RankedCandidate] = {}
         for keywords, city, query_type in queries:
@@ -175,7 +184,7 @@ class LodgingTool:
         """高德对部分关键词（如"四星酒店"）偶发返回空，空结果时重试（约 1/3 失败率，3 次后 ~1/27）"""
         for _attempt in range(3):
             try:
-                pois = amap_client.search_pois(keywords=keywords, city=city, city_limit=True) or []
+                pois = self.amap.search_pois(keywords=keywords, city=city, city_limit=True) or []
             except Exception:
                 pois = []
             if pois:

@@ -1,4 +1,4 @@
-import { request } from './http'
+import { request, authHeader } from './http'
 
 // 构造查询串：encodeURIComponent 各键值，跳过空值
 function q(params) {
@@ -24,11 +24,74 @@ export const api = {
   chat(payload, signal = null) {
     return request('/chat', { method: 'POST', body: JSON.stringify(payload), signal })
   },
+  // SSE 流式对话：逐个解包 event/data 帧并回调 onPing/onStage/onToken/onDone/onError，
+  // resolve 返回最后的 done 载荷（全量 ChatResponse）。用 fetch+ReadableStream（POST 请求，
+  // EventSource 不支持），signal 用于中止。
+  chatStream(payload, signal = null, handlers = {}) {
+    const { onPing, onStage, onToken, onDone, onError } = handlers
+    return fetch('/chat/stream', {
+      method: 'POST',
+      headers: authHeader(),
+      body: JSON.stringify(payload),
+      signal,
+    }).then(async (res) => {
+      if (!res.ok) {
+        let msg = '请求失败 ' + res.status
+        try { const d = await res.json(); msg = d.detail || msg } catch (e) { /* ignore */ }
+        const err = new Error(msg)
+        err.status = res.status
+        if (onError) onError(err)
+        throw err
+      }
+      if (!res.body) throw new Error('当前浏览器不支持流式响应')
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buf = ''
+      let doneEvent = null
+      const handleFrame = (frame) => {
+        let event = 'message'
+        let data = ''
+        for (const line of frame.split('\n')) {
+          if (line.startsWith('event:')) event = line.slice(6).trim()
+          else if (line.startsWith('data:')) data = line.slice(5).trim()
+        }
+        if (!data) return
+        let obj
+        try { obj = JSON.parse(data) } catch (e) { return }
+        if (event === 'ping') { if (onPing) onPing(obj) }
+        else if (event === 'stage') { if (onStage) onStage(obj) }
+        else if (event === 'token') { if (onToken) onToken(obj) }
+        else if (event === 'done') { doneEvent = obj; if (onDone) onDone(obj) }
+      }
+      try {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buf += decoder.decode(value, { stream: true })
+          let idx
+          while ((idx = buf.indexOf('\n\n')) !== -1) {
+            const frame = buf.slice(0, idx)
+            buf = buf.slice(idx + 2)
+            handleFrame(frame)
+          }
+        }
+      } finally {
+        reader.releaseLock()
+      }
+      return doneEvent
+    })
+  },
   sessions() {
     return request('/sessions')
   },
   getSession(sid) {
     return request('/session/' + encodeURIComponent(sid))
+  },
+  sessionEvents(sid) {
+    return request('/session/' + encodeURIComponent(sid) + '/events')
+  },
+  undoSession(sid) {
+    return request('/session/' + encodeURIComponent(sid) + '/undo', { method: 'POST' })
   },
   deleteSession(sid) {
     return request('/session/' + encodeURIComponent(sid), { method: 'DELETE' })

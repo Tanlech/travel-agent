@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from app.infrastructure.amap_client import amap_client
-from app.infrastructure.conversions import safe_float
+from app.infrastructure.conversions import safe_float, safe_str
 from app.infrastructure.settings import settings
 from app.agent.knowledge import ATTRACTION_COLLECTION, knowledge_service
 from app.agent.tools.prompt.attraction import (
@@ -34,6 +34,19 @@ class AttractionTool:
     """召回某城市代表性景点候选（知识库为主，高德搜索补充）"""
     name = "attraction_tool"
 
+    def __init__(self, amap=None, knowledge=None) -> None:
+        # 可注入的后端（测试可替换为 fake）；默认走真实 amap_client / knowledge_service
+        self._amap = amap
+        self._knowledge = knowledge
+
+    @property
+    def amap(self):
+        return self._amap if self._amap is not None else amap_client
+
+    @property
+    def knowledge(self):
+        return self._knowledge if self._knowledge is not None else knowledge_service
+
     def run(self, input_data: AttractionInput) -> AttractionResult:
         input_data = self._normalize_input(input_data)
         # 知识库为主：命中城市返回知识库结果；未命中走搜索兜底
@@ -60,7 +73,7 @@ class AttractionTool:
     def _run_from_kb(self, input_data: AttractionInput) -> AttractionResult | None:
         """城市已入库：RAG 召回 + 硬过滤（must 三级兜底 / avoid 排除 / 噪声 / 现有 / 数量上限）；
         非必去名额的排序与择优交给 LLM，失败降级按库序截断"""
-        items = knowledge_service.get_all(ATTRACTION_COLLECTION, where={"city": input_data.city})
+        items = self.knowledge.get_all(ATTRACTION_COLLECTION, where={"city": input_data.city})
         if not items:
             return None
 
@@ -152,7 +165,7 @@ class AttractionTool:
     # =================== 路径②：城市未入库（搜索兜底） ===================
     def _run_from_search(self, input_data: AttractionInput) -> AttractionResult:
         """城市未入库：不铺开主题召回，只对用户想去/必去的景点逐个搜索；无必去则返回空并提示"""
-        if not amap_client.is_enabled():
+        if not self.amap.is_enabled():
             return AttractionResult(
                 city=input_data.city,
                 error="高德地图未配置（AMAP_KEY）",
@@ -199,7 +212,7 @@ class AttractionTool:
     # ===================== 搜索 + 沉淀闭环 =====================
     def _search_and_persist(self, raw_name: str, city: str) -> AttractionCandidate | None:
         """用用户原始名搜索高德，取名字相关的非噪声 POI 作为该必去景点的正式候选"""
-        if not amap_client.is_enabled():
+        if not self.amap.is_enabled():
             return None
         best: AttractionCandidate | None = None
         best_poi: dict | None = None
@@ -220,6 +233,10 @@ class AttractionTool:
             area=best.area,
             estimated_visit_duration_hours=self._fallback_duration(best),
             reason=self._fallback_reason(best.name, best.area),
+            poi_id=best.poi_id,
+            lng=best.lng,
+            lat=best.lat,
+            address=best.address,
         )
         if settings.attraction_persist_enabled:
             self._persist_spot(city, best, best_poi)
@@ -361,7 +378,7 @@ class AttractionTool:
         """高德对部分关键词偶发返回空，空结果时重试"""
         for _attempt in range(3):
             try:
-                pois = amap_client.search_pois(keywords=keyword, city=city) or []
+                pois = self.amap.search_pois(keywords=keyword, city=city) or []
             except Exception:
                 pois = []
             if pois:
@@ -373,7 +390,14 @@ class AttractionTool:
         if not name:
             return None
         area = poi.get("adname") or poi.get("cityname") or poi.get("address") or city
-        return AttractionCandidate(name=name, area=str(area).strip() if area else city)
+        return AttractionCandidate(
+            name=name,
+            area=str(area).strip() if area else city,
+            poi_id=safe_str(poi.get("poi_id")),
+            lng=safe_float(poi.get("lng")),
+            lat=safe_float(poi.get("lat")),
+            address=str(poi.get("address") or "").strip() or None,
+        )
 
     # ================ 规则：匹配 / 打分 / 兜底 / 去重 ================
 

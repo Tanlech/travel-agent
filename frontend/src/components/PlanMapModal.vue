@@ -13,7 +13,7 @@
             {{ lg.label }}
           </span>
         </div>
-        <div class="map-tip">● 圆点为景点（数字为第几天），线段为该日串联路线，不同颜色代表不同天；点击标记可查看详情。</div>
+        <div class="map-tip">● 圆点=景点（数字为天数）、紫方=餐饮、蓝点=交通、红=住宿；加粗实线=真实乘车/步行路线（按高德规划），细灰虚线=无精确路线时的兜底连线；点击路线或标记查看转乘详情。</div>
         <div ref="mapEl" id="mapWrap"></div>
       </div>
     </div>
@@ -40,7 +40,7 @@ onMounted(async () => {
   const allPoints = []
   days.forEach((day, i) => {
     const color = DAY_COLORS[i % DAY_COLORS.length]
-    const items = (day.items || []).filter((it) => it.item_type === 'attraction' && it.lng != null && it.lat != null)
+    const items = (day.items || []).filter((it) => ['attraction', 'meal', 'transport'].includes(it.item_type) && it.lng != null && it.lat != null)
     items.forEach((it) => allPoints.push([it.lat, it.lng]))
     dayLayers.push({ color, items, idx: day.day_index ?? day.day ?? (i + 1) })
   })
@@ -58,23 +58,57 @@ onMounted(async () => {
   })
 
   legend.value = dayLayers.map(({ color, idx }) => ({ type: 'line', color, label: 'Day ' + idx + ' 路线' }))
+  legend.value.push({ type: 'dot', color: '#7c3aed', label: '餐饮' })
+  legend.value.push({ type: 'dot', color: '#2563eb', label: '交通' })
   if (stay) legend.value.push({ type: 'dot', color: '#e0245e', label: '住宿' })
 
   dayLayers.forEach(({ color, items, idx }) => {
-    if (items.length >= 2) {
-      L.polyline(items.map((it) => [it.lat, it.lng]), { color, weight: 3, opacity: 0.85 }).addTo(map)
-        .bindPopup('<b>Day ' + idx + ' 当日路线</b>')
-    }
+    // ① 真实路线：转场/进店块携带高德返回的轨迹点(path)，直接按其走向绘制加粗实线
     items.forEach((it) => {
-      const icon = L.divIcon({
-        className: '',
-        html: '<div style="width:20px;height:20px;border-radius:50%;background:' + color +
-          ';border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;color:#fff;font-size:10px;font-weight:700">' + idx + '</div>',
-        iconSize: [20, 20], iconAnchor: [10, 10],
-      })
+      const path = it.path && Array.isArray(it.path) && it.path.length >= 2 ? it.path : null
+      if (!path) return
+      const routeInfo = it.detail || ''
+      L.polyline(path, { color, weight: 4, opacity: 0.9 }).addTo(map)
+        .bindPopup('<b>' + esc(it.title || '') + ' 交通路线</b><br>' + esc(String(routeInfo).slice(0, 120)))
+    })
+    // ② 目的地顺序兜底：景点/餐饮之间若没有真实轨迹，才用细灰虚线简单串联，避免“每点连线”主导
+    const dests = items.filter((it) => it.item_type === 'meal' || it.item_type === 'attraction')
+    for (let n = 0; n < dests.length - 1; n++) {
+      const a = dests[n]
+      const b = dests[n + 1]
+      if (a.lng == null || a.lat == null || b.lng == null || b.lat == null) continue
+      if (Math.abs(a.lat - b.lat) > 1e-6 || Math.abs(a.lng - b.lng) > 1e-6) {
+        L.polyline([[a.lat, a.lng], [b.lat, b.lng]], { color: '#cfd6e4', weight: 1.5, opacity: 0.9, dashArray: '5 6' }).addTo(map)
+      }
+    }
+    const keyOf = (it) => Math.round(it.lat * 1000) + ',' + Math.round(it.lng * 1000)
+    // 先汇总全天“目的地”坐标（景点/餐饮，无论前后顺序）。交通目的地若落在其上，则不单独打点（仍参与连线）
+    const destinationKeys = new Set()
+    items.forEach((it) => {
+      if (it.item_type !== 'transport') destinationKeys.add(keyOf(it))
+    })
+    const usedCoords = new Set() // 通用去重（对称方向），避免交通与目的地叠点
+    items.forEach((it) => {
+      const key = keyOf(it)
+      const isMeal = it.item_type === 'meal'
+      const isTransport = it.item_type === 'transport'
+      let html
+      if (isMeal) {
+        html = '<div style="width:20px;height:20px;border-radius:8px;background:#7c3aed;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;color:#fff;font-size:11px;font-weight:700">食</div>'
+      } else if (isTransport) {
+        html = '<div style="width:20px;height:20px;border-radius:50%;background:#2563eb;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;color:#fff;font-size:11px;font-weight:700">交</div>'
+      } else {
+        html = '<div style="width:20px;height:20px;border-radius:50%;background:' + color +
+          ';border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;color:#fff;font-size:10px;font-weight:700">' + idx + '</div>'
+      }
+      // 交通目的地与全天任一目标点（景点/餐饮）重合，或与已打点重合（含方向对称的去重）时，不再重复打点
+      if (isTransport && destinationKeys.has(key)) return
+      if (usedCoords.has(key)) return
+      usedCoords.add(key)
+      const icon = L.divIcon({ className: '', html, iconSize: [20, 20], iconAnchor: [10, 10] })
       const time = (it.start_time || '') + (it.end_time ? '-' + it.end_time : '')
       L.marker([it.lat, it.lng], { icon }).addTo(map).bindPopup(
-        '<b>' + esc(it.title || '') + '</b><br>' + esc(time) + (it.area ? ' · ' + esc(it.area) : '')
+        '<b>' + esc(it.title || '') + '</b><br>' + esc(time) + (it.area ? ' · ' + esc(it.area) : '') + (it.address ? '<br>' + esc(it.address) : '')
       )
     })
   })

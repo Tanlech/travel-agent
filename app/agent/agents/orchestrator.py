@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import json
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Callable
 from uuid import uuid4
 
-from app.agent.agents.planning import planning_agent
+from app.agent.agents.planning import PlanningDegradedError, planning_agent
 from app.agent.agents.prompt.orchestrator import ORCHESTRATOR_QA_CHAT_PROMPT
 from app.agent.agents.revise import revise_agent
 from app.agent.agents.schema.orchestrator import AgentRequest, AgentResponse
@@ -17,6 +17,7 @@ from app.agent.domain.common.planning import compute_missing_fields, extract_pla
 from app.agent.domain.common.time import utc_now
 from app.agent.domain.common.user import UserContext
 from app.agent.domain.memory.manager import memory_manager
+from app.infrastructure.settings import settings
 from app.agent.domain.session.mapper import (
     build_follow_up_question,
     build_plan_summary,
@@ -92,6 +93,8 @@ class _BranchCtx:
     trace_id: str
     budget_tracker: TokenBudgetTracker
     session_id: str
+    # 流式进度回调（SSE）：kind ∈ {"stage", "token"}，data 为字典载荷；缺失时走同步全量路径
+    emitter: Callable[[str, dict], None] | None = field(default=None)
 
 
 class TravelOrchestrator:
@@ -101,7 +104,11 @@ class TravelOrchestrator:
     按 conversation_stage 路由到 clarify / planning / revise / qa 四个分支
     """
 
-    def handle(self, agent_request: AgentRequest) -> AgentResponse:
+    def handle(
+        self,
+        agent_request: AgentRequest,
+        progress: Callable[[str, dict], None] | None = None,
+    ) -> AgentResponse:
         trace_id = new_trace_id()
         budget_tracker = TokenBudgetTracker(default_budget_policy())
         session_id = agent_request.session_id or str(uuid4())
@@ -124,6 +131,9 @@ class TravelOrchestrator:
         )
 
         mode = stage_to_execution_mode(session_state.conversation_stage)
+
+        # 事件日志：记录用户本轮输入（只追加，供历史重建/审计）
+        redis_session_repository.append_event(session_id, "user_message", {"text": agent_request.message[:500]})
 
         # 会话已关闭（closed 终态）：结束态拦截，不再走分支编排，明确引导开新会话。
         # 原本 closed 会经 stage_to_execution_mode 落进 qa 闲聊，用户消息被当成普通对话，
@@ -159,6 +169,7 @@ class TravelOrchestrator:
             trace_id=trace_id,
             budget_tracker=budget_tracker,
             session_id=session_id,
+            emitter=progress,
         )
         response = self._dispatch(ctx)
         # 仅缓存成功结果（副作用分支已完成落库），失败/追问不缓存
@@ -190,6 +201,15 @@ class TravelOrchestrator:
             reply_len=len(reply_text),
         )
         return response
+
+    # 流式进度发射：回调异常不影响主流程（前端连接断开/超时都不阻断编排）
+    @staticmethod
+    def _emit(ctx: _BranchCtx, kind: str, data: dict) -> None:
+        if ctx.emitter:
+            try:
+                ctx.emitter(kind, data)
+            except Exception:  # noqa: BLE001
+                pass
 
     # 请求级幂等：读取首次处理结果（Redis 短 TTL）。缓存绑定 message：同一 request_id
     # 携带不同消息（客户端误用）视为新请求不命中，避免返回陈旧响应
@@ -226,13 +246,19 @@ class TravelOrchestrator:
 
     # 分支二：执行旅行规划
     def _handle_planning(self, ctx: _BranchCtx) -> AgentResponse:
+        self._emit(ctx, "stage", {"label": "正在检索景点与天气，整理候选…"})
         planning_request = session_state_to_planning_request(ctx.session_state)
         try:
             plan_result = planning_agent.run_pipeline(
-                PlanInput(request=planning_request, user_id=ctx.agent_request.user_id, session_id=ctx.session_id)
+                PlanInput(request=planning_request, user_id=ctx.agent_request.user_id, session_id=ctx.session_id),
+                progress=_pipeline_progress(ctx),
             )
+        except PlanningDegradedError as exc:
+            # 降级错误：把内部 detail 记入日志，对外用可读的引导重试消息
+            return self._fail_branch(ctx, error=exc.detail or str(exc), message=exc.user_message)
         except Exception as exc:
             return self._fail_branch(ctx, error=str(exc), message="行程规划失败，请稍后重试或补充更多信息。")
+        self._emit(ctx, "stage", {"label": "行程已生成，正在整理信息…"})
         plan = plan_result.get("plan")
         draft = plan_result.get("final_draft")
         summary = (plan_result.get("final_decision") or {}).get("summary") or "已为你生成旅行行程。"
@@ -240,6 +266,22 @@ class TravelOrchestrator:
             # 防御：run_pipeline 正常失败必抛异常走 except，此处仅覆盖"返回缺 plan 的 dict"这一不应发生
             # 的情形，按失败统一处理，避免"无行程却标记已完成 / 推进会话阶段"的语义矛盾
             return self._fail_branch(ctx, error="plan_missing_in_pipeline_result", message="行程规划失败，请稍后重试或补充更多信息。")
+        # 完整性探针：确认 plan 是完整行程而非仅有汇总，方便排查前端"只显示文字不显示行程"类问题
+        _plan_days = plan.daily_plan or []
+        app_logger.info(
+            "orchestrator_plan_ready",
+            request_id=ctx.agent_request.request_id,
+            trace_id=ctx.trace_id,
+            days=len(_plan_days),
+            blocks=int(sum(len((d or {}).get("time_blocks") or (d or {}).get("items") or []) for d in _plan_days)),
+            has_destination=bool((plan.model_dump().get("destination") if hasattr(plan, "model_dump") else None)),
+            has_stay=bool(getattr(plan, "stay_recommendation", None)),
+            has_weather=bool(getattr(plan, "weather_notes", None)),
+            has_alternatives=bool(getattr(plan, "alternatives", None)),
+            has_transport=bool(getattr(plan, "transport_plan", None)),
+            draft_present=draft is not None,
+            summary_chars=len(summary),
+        )
         return self._finalize_success(
             ctx,
             plan_payload=plan.model_dump(),
@@ -313,9 +355,11 @@ class TravelOrchestrator:
             trip_history=ctx.trip_history,
         )
         try:
+            self._emit(ctx, "stage", {"label": "正在按你的要求调整行程…"})
             revise_result = revise_agent.run(revise_input)
         except Exception as exc:
             return self._fail_branch(ctx, error=str(exc), message="行程修改失败，请稍后重试或换个说法。")
+        self._emit(ctx, "stage", {"label": "调整完成，正在整理信息…"})
         plan_model = revise_result.artifacts.plan
         draft_model = revise_result.artifacts.draft
         summary = revise_result.summary or "已按你的要求更新行程。"
@@ -358,6 +402,12 @@ class TravelOrchestrator:
         intent_type = ctx.intent.intent_type
         if intent_type in _QA_STATIC_REPLIES:
             summary = _QA_STATIC_REPLIES[intent_type]
+        elif ctx.emitter is not None:
+            # 流式路径：逐 token 推送，返回拼接后的完整文本（失败降级友好引导）
+            self._emit(ctx, "stage", {"label": "正在回答…"})
+            summary = self._qa_chat_reply_stream(ctx, ctx.agent_request.message, ctx.session_state)
+            if summary is None:
+                summary = _DEFAULT_QA_FALLBACK
         else:
             summary = self._qa_chat_reply(ctx.agent_request.message, ctx.session_state)
             if summary is None:
@@ -561,6 +611,12 @@ class TravelOrchestrator:
         ctx.session_state = self._notify_and_save(
             ctx.session_state, message, request_id=ctx.agent_request.request_id, trace_id=ctx.trace_id
         )
+        # 事件日志：记录本轮应答（供历史重建；改稿/规划分支还会由 plan_commit 记录产物）
+        redis_session_repository.append_event(
+            ctx.session_id,
+            "assistant_reply",
+            {"mode": ctx.mode, "status": status, "text": (message or "")[:1000]},
+        )
         return AgentResponse(
             request_id=ctx.agent_request.request_id,
             session_id=ctx.session_id,
@@ -611,9 +667,26 @@ class TravelOrchestrator:
     ) -> tuple[bool, SessionState]:
         """带冲突重试的产物提交：save_with_artifacts 冲突时以最新会话为基底重放本轮变更"""
         current = session_state
+
         for _ in range(max_attempts):
+            # 覆盖前读取当前已持久化的旧产物（load_artifacts 返回真正 plan/draft，而非内嵌摘要），
+            # 供成功后入撤销栈；冲突重试会读到最新值，快照更接近"真正被覆盖的旧产物"。
+            old_plan, old_draft = redis_session_repository.load_artifacts(current.session_id)
             saved = redis_session_repository.save_with_artifacts(current, plan_payload, draft_payload)
             if saved is not None:
+                # 撤销快照：仅在真正提交成功时入栈；连试 max_attempts 都失败则不入栈，
+                # 避免留下"未变更"的伪快照。
+                if plan_payload is not None or draft_payload is not None:
+                    redis_session_repository.push_undo(
+                        current.session_id,
+                        {"plan": old_plan, "draft": old_draft},
+                    )
+                # 事件日志：记录一次行程产物提交（含机型模式，便于追踪每次规划/改稿）
+                redis_session_repository.append_event(
+                    current.session_id,
+                    "plan_commit",
+                    {"plan_has": plan_payload is not None, "draft_has": draft_payload is not None},
+                )
                 return True, saved
             # 冲突：其他请求已推进该会话。以最新状态为基底，重放本轮产物与阶段变更后重试
             metrics_recorder.record("session_save_conflicts", 1, phase="commit_artifacts")
@@ -633,6 +706,41 @@ class TravelOrchestrator:
     # 关键：把近期对话作为真实 message 历史传入（而非塞进一段 JSON），user 原话单独成最后一条，
     # 这样 LLM 是正常连续聊天，不会"照着 JSON 里的 user_message 字段逐字回显"。
     def _qa_chat_reply(self, user_message: str, session_state: SessionState) -> str | None:
+        built = self._qa_chat_prompts(user_message, session_state)
+        if built is None:
+            return None
+        system_cue, history, user_prompt = built
+        return get_llm_client().generate_chat_reply(
+            system_prompt=system_cue,
+            user_prompt=user_prompt,
+            history=history,
+        )
+
+    # qa 分支的流式自由对话：逐 token 经 ctx.emitter 推送，返回完整文本（失败返回 None）
+    def _qa_chat_reply_stream(
+        self,
+        ctx: _BranchCtx,
+        user_message: str,
+        session_state: SessionState,
+    ) -> str | None:
+        built = self._qa_chat_prompts(user_message, session_state)
+        if built is None:
+            return None
+        system_cue, history, user_prompt = built
+        return get_llm_client().generate_chat_reply_stream(
+            system_prompt=system_cue,
+            user_prompt=user_prompt,
+            history=history,
+            emit=lambda piece: self._emit(ctx, "token", {"text": piece}),
+        )
+
+    # 拼装 qa 对话的 prompts：system 提示词（含行程摘要）+ 规整后的历史 + 带知识参考的用户输入
+    # LLM 不可用时返回 None，由调用方降级（同步与流式两条路径复用，避免口径漂移）
+    def _qa_chat_prompts(
+        self,
+        user_message: str,
+        session_state: SessionState,
+    ) -> tuple[str, list[dict], str] | None:
         llm_client = get_llm_client()
         if not llm_client.is_enabled():
             return None
@@ -660,13 +768,7 @@ class TravelOrchestrator:
         # （仅检索不回写；检索失败/为空时不影响本次自由回答）
         ref_context = self._retrieve_kb_context(user_message)
         user_prompt = f"【知识参考】\n{ref_context}\n\n{user_message}" if ref_context else user_message
-
-        reply = llm_client.generate_chat_reply(
-            system_prompt=system_cue,
-            user_prompt=user_prompt,
-            history=history,
-        )
-        return reply
+        return system_cue, history, user_prompt
 
     # 问答 RAG 检索：从问答库/景点库/对话库三处各取 top_k 相关块，轮转去重后拼成参考文本。
     # 三库相似度并不可比，用轮转混合保证来源多样，避免某一个库分数虚高独占上下文
@@ -675,6 +777,11 @@ class TravelOrchestrator:
         for coll in (QA_COLLECTION, ATTRACTION_COLLECTION, CHAT_COLLECTION):
             try:
                 result = knowledge_service.retrieve(coll, query, top_k=top_k)
+                # 相关度门槛：distance（单库余弦约 [0,1]，混合路为 RRF 小评分）低于 ref_min_score
+                # 视为弱相关，丢弃，避免把无关片段（如异地景点）注入给模型。
+                min_score = getattr(settings, "ref_min_score", 0.0)
+                if min_score and min_score > 0:
+                    result.items = [it for it in result.items if it.distance is not None and it.distance >= min_score]
                 pools[coll] = list(result.items)
             except Exception:
                 app_logger.warning("kb_retrieve_fail", collection=coll, query=query)
@@ -708,3 +815,11 @@ class TravelOrchestrator:
 
 
 travel_orchestrator = TravelOrchestrator()
+
+
+def _pipeline_progress(ctx: _BranchCtx):
+    """把 orchestration 的 emitter 透传给规划管线（planning.run_pipeline）：
+    使规划内部的细粒度阶段也走 SSE；非流式（ctx.emitter 为空）时返回 None。"""
+    if ctx.emitter is None:
+        return None
+    return lambda kind, data: TravelOrchestrator._emit(ctx, kind, data)

@@ -45,16 +45,29 @@ def retrieve(
     top_k: int = 5,
     where: dict | None = None,
     query_sparse: SparseVector | None = None,
+    reranker: Any = None,
+    candidate_k: int = 30,
 ) -> RetrievalResult:
-    """检索：问题向量化 → 向量库检索
+    """检索：问题向量化 → 向量库召回 → （可选）重排精筛 → top-k
 
     提供 query_sparse（稀疏向量）时走混合检索（稠密语义 + 稀疏关键词 → RRF 融合）
     稠密向量不可用（如未配 key）但稀疏可用时退化为纯稀疏检索；否则仅稠密
+    传入 reranker 时先召回 candidate_k 个候选再做 cross-encoder 重排截取 top_k；
+    重排不可用/失败时优雅回退，返回原召回的前 top_k，不影响主链路
     空 query 由上层（service.retrieve）统一早退，这里不再重复判断
     """
     top_k = max(1, min(int(top_k), settings.retrieval_max_top_k))
     query_embedding = embed_cached(embedder, query, "dense")
     if not query_embedding and not query_sparse:
         return RetrievalResult(collection=collection, query=query, items=[])
-    items = store.query(collection, query_embedding, n_results=max(1, top_k), where=where, query_sparse=query_sparse)
+    if reranker is not None:
+        # 候选池可 > top_k 上限：用独立上限（candidate_max_k）而非顶级上限（max_top_k），
+        # 否则 candidate_k 会被 20 静默截断，重排召回空间失去提升意义
+        candidate_k = max(top_k, min(int(candidate_k), settings.retrieval_candidate_max_k))
+        fetch_k = candidate_k
+    else:
+        fetch_k = top_k
+    items = store.query(collection, query_embedding, n_results=fetch_k, where=where, query_sparse=query_sparse)
+    if reranker is not None and len(items) > top_k:
+        items = reranker.rerank(query, items, top_k)
     return RetrievalResult(collection=collection, query=query, items=items)

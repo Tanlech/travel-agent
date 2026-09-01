@@ -14,8 +14,10 @@ from pydantic import BaseModel
 
 from app.agent.tools.attraction import attraction_tool
 from app.agent.tools.lodging import lodging_tool
+from app.agent.tools.meal import meal_tool
 from app.agent.tools.schema.attraction import AttractionInput
 from app.agent.tools.schema.lodging import LodgingInput
+from app.agent.tools.schema.meal import MealInput
 from app.agent.tools.schema.transport import TransportInput
 from app.agent.tools.schema.weather import WeatherInput
 from app.agent.tools.transport import transport_tool
@@ -87,6 +89,16 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         ),
         "parameters": _schema_of(WeatherInput),
         "execute": lambda args: _execute(WeatherInput, weather_tool.run, args),
+    },
+    {
+        "name": "meal_tool",
+        "description": (
+            "检索某城市符合饮食偏好的真实餐饮候选。当行程需要安排午餐/晚餐，或需要从真实餐馆候选中选择时调用；"
+            "输入城市、饮食偏好（如火锅/本地菜/清淡）、行程景点（用于就近排序），"
+            "返回真实餐馆候选列表（含名称、区域、类型、评分、距景点距离、地址），供你排进每天的餐饮时段。"
+        ),
+        "parameters": _schema_of(MealInput),
+        "execute": lambda args: _execute(MealInput, meal_tool.run, args),
     },
 ]
 

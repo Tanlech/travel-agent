@@ -23,26 +23,20 @@
           <div v-if="dayWeather(i)" class="day-weather">🌤️ {{ dayWeather(i) }}</div>
 
           <template v-if="dayBlocks(day).length">
-            <template v-for="type in PLAN_SEC_ORDER" :key="type">
-              <div v-if="grouped[type] && grouped[type].length">
-                <div class="plan-sec">{{ secLabel(type) }}<span class="sec-line"></span></div>
-                <div class="blocks">
-                  <div v-for="(b, bi) in grouped[type]" :key="bi" class="block">
-                    <span class="b-time">{{ blockTime(b) }}</span>
-                    <span>{{ secIcon(b.item_type) }}</span>
+            <div class="blocks">
+              <div v-for="(b, bi) in sortedBlocks(day)" :key="bi" class="block">
+                <span class="b-time">{{ blockTime(b) }}</span>
+                <div class="b-body">
+                  <span class="b-line">
+                    <span class="b-icon">{{ secIcon(b) }}</span>
+                    <span v-if="secLabel(b)" class="b-sec">{{ secLabel(b) }}</span>
                     <span class="b-title">{{ b.title || '' }}</span>
-                    <a
-                      v-if="b.item_type === 'attraction'"
-                      class="day-map-link"
-                      target="_blank"
-                      rel="noopener"
-                      :href="'https://uri.amap.com/search?keyword=' + encodeURIComponent(b.title || '')"
-                    >地图</a>
-                    <div v-if="b.detail" class="b-detail">{{ b.detail }}</div>
-                  </div>
+                    <span v-if="b.transport && b.transport.mode" class="b-mode">{{ b.transport.mode }}</span>
+                  </span>
+                  <div v-if="b.detail" class="b-detail">{{ b.detail }}</div>
                 </div>
               </div>
-            </template>
+            </div>
           </template>
 
           <div v-if="(day.notes || []).length" style="margin-top:8px;font-size:11px;color:#9094a2;line-height:1.6">
@@ -72,15 +66,6 @@ import { ref, computed } from 'vue'
 const props = defineProps({ plan: { type: Object, required: true } })
 defineEmits(['show-map'])
 
-const PLAN_SEC_META = {
-  transport: { label: '🚗 交通' },
-  attraction: { label: '🏛️ 景点' },
-  meal: { label: '🍽️ 餐饮' },
-  flex: { label: '✨ 弹性活动' },
-  return: { label: '🏠 返程' },
-}
-const PLAN_SEC_ORDER = ['transport', 'attraction', 'meal', 'flex', 'return']
-
 const activeDay = ref(0)
 const showRaw = ref(false)
 const planJson = computed(() => JSON.stringify(props.plan, null, 2))
@@ -96,6 +81,15 @@ function dayArea(day) {
 function dayBlocks(day) {
   return day.time_blocks || day.blocks || day.items || []
 }
+// 当天 block 按开始时间升序，保证"交通→景点→餐饮→返程"以真实时刻呈现，而非按类型分组
+function sortedBlocks(day) {
+  return dayBlocks(day).slice().sort((a, b) => strTime(a.start_time) - strTime(b.start_time))
+}
+function strTime(t) {
+  if (!t) return 0
+  const p = String(t).split(':').map(Number)
+  return (p[0] || 0) * 60 + (p[1] || 0)
+}
 function dayWeather(i) {
   const wn = Array.isArray(props.plan.weather_notes) ? props.plan.weather_notes[i] : ''
   return typeof wn === 'string' ? wn : ''
@@ -103,11 +97,20 @@ function dayWeather(i) {
 function blockTime(b) {
   return (b.start_time || '') + (b.end_time ? '-' + b.end_time : '')
 }
-function secLabel(type) {
-  return (PLAN_SEC_META[type] && PLAN_SEC_META[type].label) || type || '其他'
+function secIcon(b) {
+  if (typeof b === 'string') {
+    return { attraction: '🏛️', transport: '🚗', meal: '🍽️', return: '🏠', flex: '✨' }[b] || '•'
+  }
+  if (b && b.item_type === 'transport') {
+    const m = (b.transport && b.transport.mode) || ''
+    if (m.includes('步行')) return '🚶'
+    if (m.includes('地铁') || m.includes('公交')) return '🚇'
+    return '🚗'
+  }
+  return { attraction: '🏛️', transport: '🚗', meal: '🍽️', return: '🏠', flex: '✨' }[(b && b.item_type) || ''] || '•'
 }
-function secIcon(type) {
-  return { attraction: '🏛️', transport: '🚗', meal: '🍽️', return: '🏠', flex: '✨' }[type] || '•'
+function secLabel(b) {
+  return { transport: '交通', return: '返程', attraction: '景点', meal: '餐饮', flex: '弹性' }[(b && b.item_type) || ''] || ''
 }
 const stayText = computed(() => {
   const stay = props.plan.stay_recommendation && props.plan.stay_recommendation[0]
@@ -131,10 +134,15 @@ const weatherChip = computed(() => {
 .day-item { background: #f7f8fb; border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; font-size: 13px; }
 .day-item .day-label { font-weight: 700; color: var(--primary); margin-right: 6px; }
 .blocks { margin-top: 6px; }
-.block { font-size: 12px; color: #444; padding: 3px 0; line-height: 1.5; display: flex; align-items: baseline; gap: 4px; }
-.b-time { color: var(--primary); font-weight: 600; font-size: 11px; flex-shrink: 0; }
+.block { font-size: 12px; color: #444; padding: 4px 0; line-height: 1.5; display: flex; gap: 8px; }
+.b-time { color: var(--primary); font-weight: 600; font-size: 11px; width: 92px; flex-shrink: 0; }
+.b-body { flex: 1; min-width: 0; }
+.b-line { display: inline-flex; align-items: baseline; gap: 5px; flex-wrap: wrap; }
+.b-icon { flex-shrink: 0; }
+.b-sec { font-size: 10px; color: var(--muted); flex-shrink: 0; }
 .b-title { color: #333; }
-.b-detail { color: #9094a2; font-size: 11px; padding-left: 26px; margin-top: 1px; }
+.b-mode { font-size: 10px; color: #fff; background: var(--primary); border-radius: 4px; padding: 0 6px; line-height: 16px; flex-shrink: 0; }
+.b-detail { color: #9094a2; font-size: 11px; margin-top: 2px; padding-left: 0; }
 .meta-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
 .meta-chip { font-size: 11px; background: #eef; color: #445; padding: 4px 10px; border-radius: 8px; }
 .day-tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
@@ -142,7 +150,6 @@ const weatherChip = computed(() => {
 .day-tab.active { background: var(--primary); color: #fff; border-color: var(--primary); }
 .day-content { display: none; }
 .day-content.active { display: block; animation: fadeIn .2s ease; }
-.day-map-link { margin-left: 6px; text-decoration: none; font-size: 11px; color: var(--primary); background: var(--primary-light); padding: 1px 7px; border-radius: 4px; }
 .plan-sec { font-size: 11px; font-weight: 700; color: var(--muted); margin: 10px 0 4px; letter-spacing: .5px; display: flex; align-items: center; gap: 4px; }
 .plan-sec .sec-line { flex: 1; height: 1px; background: var(--border); }
 .plan-actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }

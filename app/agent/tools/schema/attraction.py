@@ -8,6 +8,10 @@ class AttractionCandidate(BaseModel):
     area: str | None = None
     estimated_visit_duration_hours: float | None = None
     reason: str | None = None
+    poi_id: str | None = Field(default=None, description="高德 POI ID，用于地图标点/坐标回填")
+    lng: float | None = Field(default=None, description="高德经度，用于地图标点/路线回填")
+    lat: float | None = Field(default=None, description="高德纬度，用于地图标点/路线回填")
+    address: str | None = Field(default=None, description="高德地址")
 
 
 class AttractionInput(BaseModel):

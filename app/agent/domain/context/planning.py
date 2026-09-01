@@ -9,6 +9,7 @@ from app.agent.domain.common.session_context import SessionContext
 from app.agent.domain.common.user import UserContext
 from app.agent.tools.schema.attraction import AttractionResult
 from app.agent.tools.schema.lodging import LodgingCandidate, LodgingResult
+from app.agent.tools.schema.meal import MealResult
 from app.agent.tools.schema.transport import TransportResult
 from app.agent.tools.schema.weather import WeatherResult
 
@@ -25,6 +26,9 @@ class PlanningContext(BaseModel):
     attraction_result: AttractionResult | None = None
     lodging_result: LodgingResult | None = None
     selected_lodging: LodgingCandidate | None = None
+    meal_result: MealResult | None = None
+    # 按天索引的餐饮候选池 dict[day_index -> list[dict]]：骨架定下每天景点分布后，由 agent 逐天自主查询就近餐馆
+    day_meal_pool: dict[int, list[dict]] = Field(default_factory=dict)
     transport_results: list[TransportResult] = Field(default_factory=list)
     draft: ItineraryDraftSchema | None = None  # 行程稿（中间产物）
     plan: TripPlan | None = None  # 对外行程结果
